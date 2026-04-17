@@ -7,13 +7,16 @@ services:
     volumes:
       - /var/run/arduino-router.sock:/var/run/arduino-router.sock
       - n8n_data:/home/node/.n8n
-      - ./custom:/home/node/.n8n/custom:ro
+      - ./local-files:/files
     environment:
-      - N8N_BASIC_AUTH_ACTIVE=true
-      - N8N_BASIC_AUTH_USER=admin
-      - N8N_BASIC_AUTH_PASSWORD=${N8N_PASSWORD:?set N8N_PASSWORD}
+      # Auth is handled by n8n's built-in user management — open /setup on first launch to create the owner.
       - GENERIC_TIMEZONE=Europe/Malta
       - TZ=Europe/Malta
+      - N8N_COMMUNITY_PACKAGES_ENABLED=true
+      - N8N_COMMUNITY_PACKAGES_ALLOW_TOOL_USAGE=true
+      # LAN access via http://<q-hostname>:5678 — no TLS terminator in front of n8n.
+      # Put a reverse proxy with a cert in front if exposing beyond the local network.
+      - N8N_SECURE_COOKIE=false
 
 volumes:
   n8n_data:

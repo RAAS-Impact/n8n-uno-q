@@ -1,13 +1,33 @@
-// TODO: Implement UnoQ Tool (AI Agent sub-node)
-// - name: MCU method name
-// - description: plain-English for the LLM
-// - parameter schema: list of {name, type, description, required}
-// - human review gate (checkbox, default on for state-changing methods)
-// - socket path (Advanced options)
-//
-// Extends tool sub-node pattern with ai_tool connection type.
-// Under the hood: bridge.call(method, params) — same as UnoQCall.
+import type {
+  INodeType,
+  INodeTypeDescription,
+  ISupplyDataFunctions,
+  SupplyData,
+} from 'n8n-workflow';
 
-export class UnoQTool {
-  // Placeholder — will implement INodeType with ai_tool output
+// Scaffold: empty AI-tool sub-node so n8n loads the package.
+// TODO: expose bridge.call(method, params) as a DynamicStructuredTool.
+export class UnoQTool implements INodeType {
+  description: INodeTypeDescription = {
+    displayName: 'Arduino UNO Q Tool',
+    name: 'unoQTool',
+    icon: 'file:unoQTool.svg',
+    group: ['transform'],
+    version: 1,
+    description: 'Expose an Arduino UNO Q method as a tool for the AI Agent',
+    defaults: { name: 'Arduino UNO Q Tool' },
+    codex: {
+      categories: ['AI'],
+      subcategories: { AI: ['Tools'] },
+      alias: ['Arduino', 'UNO Q', 'MCU', 'microcontroller', 'router', 'bridge'],
+    },
+    inputs: [],
+    outputs: ['ai_tool'],
+    outputNames: ['Tool'],
+    properties: [],
+  };
+
+  async supplyData(this: ISupplyDataFunctions): Promise<SupplyData> {
+    throw new Error('UnoQ Tool is not yet implemented');
+  }
 }

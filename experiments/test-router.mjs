@@ -1,8 +1,12 @@
 // Smoke test: connect to arduino-router via Unix socket and call $/version
 //
-// Usage (SSH tunnel from the PC):
-//   ssh -L /tmp/arduino-router.sock:/var/run/arduino-router.sock arduino@linucs
-//   UNOQ_SOCKET=/tmp/arduino-router.sock node experiments/test-router.mjs
+// Usage:
+//   1. In a separate terminal, open the SSH tunnel and leave it running:
+//        rm -f /tmp/arduino-router.sock
+//        ssh -N -L /tmp/arduino-router.sock:/var/run/arduino-router.sock arduino@linucs.local
+//   2. In this terminal, run the smoke test:
+//        UNOQ_SOCKET=/tmp/arduino-router.sock node experiments/test-router.mjs
+//   3. Stop the tunnel with Ctrl-C in the first terminal when done.
 
 import net from 'node:net';
 import { encode, decodeMultiStream } from '@msgpack/msgpack';

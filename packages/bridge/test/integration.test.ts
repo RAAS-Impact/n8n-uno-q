@@ -6,7 +6,7 @@
  *   - "MCU (bridge-test.ino)" — require sketches/bridge-test/bridge-test.ino to be flashed
  *
  * Usage (SSH tunnel from the PC):
- *   ssh -L /tmp/arduino-router.sock:/var/run/arduino-router.sock arduino@linucs
+ *   rm -f /tmp/arduino-router.sock && ssh -N -L /tmp/arduino-router.sock:/var/run/arduino-router.sock arduino@linucs.local &
  *   UNOQ_SOCKET=/tmp/arduino-router.sock npm run test:integration -w packages/bridge
  */
 import { describe, it, expect, afterEach } from 'vitest';

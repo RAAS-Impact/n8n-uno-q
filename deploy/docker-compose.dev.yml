@@ -1,0 +1,8 @@
+# Dev override — layers the Pattern A bind-mount on top of the prod base.
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+# `deploy/sync.sh` applies it automatically on the Q.
+services:
+  n8n:
+    volumes:
+      - ./custom:/home/node/.n8n/custom:ro
