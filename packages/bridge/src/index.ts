@@ -1,0 +1,10 @@
+/**
+ * @raasimpact/arduino-uno-q-bridge
+ *
+ * Public API for the MessagePack-RPC client for Arduino UNO Q's router.
+ * Everything a consumer needs is exported from here — no need to import
+ * from internal modules.
+ */
+export { Bridge } from './bridge.js';
+export type { BridgeOptions, ConnectOptions, ReconnectOptions, ProvideHandler, NotifyHandler } from './bridge.js';
+export { BridgeError, TimeoutError, ConnectionError, MethodNotAvailableError } from './errors.js';
