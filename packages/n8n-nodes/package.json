@@ -2,14 +2,11 @@
   "name": "n8n-nodes-uno-q",
   "version": "0.1.0",
   "description": "n8n community nodes for Arduino UNO Q",
-  "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
   "files": [
     "dist"
   ],
   "scripts": {
-    "build": "tsc && node scripts/copy-assets.mjs",
+    "build": "tsc --noEmit && node scripts/build.mjs && node scripts/copy-assets.mjs",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest"
   },
@@ -26,6 +23,7 @@
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
+    "esbuild": "^0.25.0",
     "n8n-workflow": "^1.0.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"

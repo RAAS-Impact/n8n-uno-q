@@ -5,21 +5,41 @@ import { Bridge } from '@raasimpact/arduino-uno-q-bridge';
  * Ensures only one socket connection per n8n process and ref-counts
  * method registrations so multiple trigger nodes can share a method.
  */
+/**
+ * Each node file is bundled independently by esbuild, so module-level state
+ * is per-bundle. To keep a true process-wide singleton across all n8n nodes,
+ * we stash the instance on globalThis under a unique Symbol.for key.
+ */
+const SINGLETON_KEY = Symbol.for('@raasimpact/arduino-uno-q/bridge-manager');
+
 export class BridgeManager {
-  private static instance: BridgeManager | null = null;
   private bridge: Bridge | null = null;
   private refCount = 0;
   private methodRefs = new Map<string, number>();
 
   static getInstance(): BridgeManager {
-    if (!BridgeManager.instance) {
-      BridgeManager.instance = new BridgeManager();
+    const g = globalThis as unknown as Record<symbol, BridgeManager | undefined>;
+    if (!g[SINGLETON_KEY]) {
+      g[SINGLETON_KEY] = new BridgeManager();
     }
-    return BridgeManager.instance;
+    return g[SINGLETON_KEY]!;
   }
 
   async acquire(socketPath?: string): Promise<Bridge> {
     this.refCount++;
+    if (!this.bridge) {
+      this.bridge = await Bridge.connect({ socket: socketPath });
+    }
+    return this.bridge;
+  }
+
+  /**
+   * Get (or lazily create) the shared Bridge without touching the refcount.
+   * Intended for short-lived users like the Call node: they don't own a
+   * subscription, so they must not participate in the acquire/release
+   * lifecycle that triggers use to decide when to close the socket.
+   */
+  async getBridge(socketPath?: string): Promise<Bridge> {
     if (!this.bridge) {
       this.bridge = await Bridge.connect({ socket: socketPath });
     }
