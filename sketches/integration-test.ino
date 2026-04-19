@@ -29,16 +29,12 @@ volatile bool interruptFired = false;
 const unsigned long HEARTBEAT_INTERVAL = 5000; // ms
 
 uint8_t LOGO[104] = {
-  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-  0, 0, 0, 3, 3, 3, 0, 3, 3, 3, 0, 0, 0,
-  0, 0, 0, 3, 0, 3, 0, 0, 3, 0, 0, 0, 0,
-  0, 0, 0, 3, 3, 0, 0, 0, 3, 0, 0, 0, 0,
-  0, 0, 0, 3, 0, 3, 0, 3, 3, 3, 0, 0, 0,
-  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 3, 0, 3, 3, 3, 0, 0, 0, 0, 0, 0,
+    3, 0, 3, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 3, 3, 0, 0, 0, 3, 0, 0,
+    0, 0, 0, 0, 0, 3, 0, 3, 0, 3, 3, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 };
-
 
 // Track when to clear the matrix after showing the logo
 unsigned long logoClearTime = 0;
@@ -74,6 +70,8 @@ void fire_test_event() { interruptFired = true; }
 // --- Setup & Loop ---
 
 void setup() {
+  Monitor.begin();
+
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, HIGH); // off (active low)
 
@@ -87,7 +85,8 @@ void setup() {
   digitalWrite(LED4_B, HIGH);
 
   pinMode(interruptPin, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(interruptPin), fire_test_event, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(interruptPin), fire_test_event,
+                  FALLING);
 
   matrix.begin();
   matrix.clear();
@@ -105,17 +104,32 @@ void setup() {
 
 void loop() {
   unsigned long now = millis();
+  unsigned int buttonValue;
 
   // Drain interrupt flag — safe to call Bridge.notify() here (not in ISR)
   if (interruptFired) {
+    Monitor.println("Interrupt fired!");
     interruptFired = false;
-    Bridge.call("gpio_event", 2); // pin 2 simulated
+
+    Monitor.println("Calling gpio_event... ");
+    auto rc = Bridge.call("gpio_event", 2);
+    MsgPack::str_t reply;
+    if (rc.result(reply)) {
+      Monitor.println(reply.c_str());
+    } else {
+      Monitor.print("err ");
+      Monitor.print(rc.getErrorCode());
+      Monitor.print(": ");
+      Monitor.println(rc.getErrorMessage().c_str());
+    }
+
     set_led_state(!ledState);
   }
 
   // Heartbeat every 5 seconds: notify + show Arduino logo
   if (now - lastHeartbeat >= HEARTBEAT_INTERVAL) {
     lastHeartbeat = now;
+
     Bridge.notify("heartbeat", (int)(now / 1000));
 
     // Show Arduino logo on the LED matrix

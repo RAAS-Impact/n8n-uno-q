@@ -11,7 +11,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 npm workspaces monorepo (Node ≥ 20, ESM, TypeScript). Two packages published independently:
 
 - [packages/bridge](packages/bridge/) — `@raasimpact/arduino-uno-q-bridge`, a pure Node.js MessagePack-RPC client for the UNO Q router. No n8n dependency.
-- [packages/n8n-nodes](packages/n8n-nodes/) — `n8n-nodes-uno-q`, community nodes (`UnoQCall`, `UnoQTrigger`, `UnoQTool`) that depend on the bridge package via workspace link.
+- [packages/n8n-nodes](packages/n8n-nodes/) — `n8n-nodes-uno-q`, community nodes (`UnoQCall`, `UnoQTrigger`, `UnoQRespond`, `UnoQTool`) that depend on the bridge package via workspace link.
 
 The n8n nodes share a process-singleton [BridgeManager](packages/n8n-nodes/src/BridgeManager.ts) that refcounts `$/register` subscriptions — this is load-bearing (see CONTEXT.md §6 "singleton client"). Do not bypass it.
 

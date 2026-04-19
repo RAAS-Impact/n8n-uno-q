@@ -52,6 +52,33 @@ describe.skipIf(SKIP)('router / Node-to-Node', () => {
     }
   });
 
+  it('provide: delayed handler (simulates UnoQRespond) still delivers the response', async () => {
+    // Mirrors what n8n's UnoQTrigger (deferred) + UnoQRespond do:
+    // the provide handler returns a Promise that resolves 5 seconds later.
+    // If this passes, the bridge/router path holds delayed responses open
+    // correctly and the workflow's 5s delay is not the problem.
+    bridge = await connect();
+    const caller = await connect();
+    try {
+      const DELAY_MS = 5000;
+      await bridge.provide('integration_test_delayed', () => {
+        return new Promise((resolve) => setTimeout(() => resolve({ ok: true }), DELAY_MS));
+      });
+
+      const started = Date.now();
+      const result = (await caller.callWithTimeout(
+        'integration_test_delayed',
+        DELAY_MS + 3000,
+      )) as Record<string, unknown>;
+      const elapsed = Date.now() - started;
+
+      expect(result.ok).toBe(true);
+      expect(elapsed).toBeGreaterThanOrEqual(DELAY_MS - 100);
+    } finally {
+      await caller.close();
+    }
+  }, 15_000);
+
   it('notify: Node → router → Node delivery', async () => {
     bridge = await connect();
     const received: unknown[][] = [];

@@ -1,0 +1,95 @@
+{
+  "name": "Uno Q Integration Tests",
+  "nodes": [
+    {
+      "parameters": {
+        "method": "gpio_event",
+        "mode": "request",
+        "options": {}
+      },
+      "type": "CUSTOM.unoQTrigger",
+      "typeVersion": 1,
+      "position": [
+        -528,
+        400
+      ],
+      "id": "2672929e-187a-43bd-a536-fea48f63b8e5",
+      "name": "Listen for button press"
+    },
+    {
+      "parameters": {
+        "method": "set_led_state",
+        "parameters": {
+          "parameter": [
+            {
+              "type": "boolean",
+              "value": "false"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "CUSTOM.unoQCall",
+      "typeVersion": 1,
+      "position": [
+        -528,
+        192
+      ],
+      "id": "a1faaeb9-f09b-4d30-9b03-3762ac066d44",
+      "name": "Set LED internal state"
+    },
+    {
+      "parameters": {
+        "method": "ping",
+        "parametersMode": "none",
+        "options": {}
+      },
+      "type": "CUSTOM.unoQCall",
+      "typeVersion": 1,
+      "position": [
+        -528,
+        0
+      ],
+      "id": "a6b1e537-77d0-451a-a61d-52462bc13dcd",
+      "name": "Ping the MCU"
+    },
+    {
+      "parameters": {
+        "method": "heartbeat",
+        "options": {}
+      },
+      "type": "CUSTOM.unoQTrigger",
+      "typeVersion": 1,
+      "position": [
+        -528,
+        -208
+      ],
+      "id": "f3794c9f-5f7e-4936-9696-21b35ff142b4",
+      "name": "Listen for MCU heartbeat"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Ping the MCU": {
+      "main": [
+        []
+      ]
+    },
+    "Listen for MCU heartbeat": {
+      "main": [
+        []
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "16034a58-24d0-4b0c-96a9-f12e8d96dab6",
+  "meta": {
+    "instanceId": "081d77cb7f62ef283b95ffe70ff8a5afc5f95f60e87cff8494e0562b04517b36"
+  },
+  "id": "L3T5HYUncxAvfB2P",
+  "tags": []
+}

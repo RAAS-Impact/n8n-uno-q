@@ -205,15 +205,15 @@ packages/bridge/
 
 - Follows the [n8n community node conventions](https://docs.n8n.io/integrations/creating-nodes/build/). Scaffold from their starter template.
 - Depends on `@raasimpact/arduino-uno-q-bridge`.
-- **Three nodes in v1:**
+- **Four nodes in v1:**
   1. **Arduino UNO Q Call** (Action node) — method name, parameters (JSON), timeout. Returns the router's response.
   2. **Arduino UNO Q Trigger** (Trigger node) — method name to register. Fires workflow on every call/notify from the MCU. Two modes:
      - *Notification* — subscribes via `bridge.onNotify`; fire-and-forget (`Bridge.notify()` on MCU). Multiple triggers can share the same method (Bridge-internal handler Set).
      - *Request* — subscribes via `bridge.provide`; handles `Bridge.call()` from MCU. Sub-mode **Response Mode** selects how the MCU gets its answer: *Acknowledge Immediately* returns a user-configurable ack right away and runs the workflow in parallel (v1 default); *Wait for Respond Node* holds the RPC response open until a UNO Q Respond node resolves it, analogous to n8n's Respond to Webhook. Only one trigger can own a Request method.
-     - The Trigger is already wired for both ack modes in v1 — the Respond node ships in v2 (§6.6). Until then, *Wait for Respond Node* will time out because nothing resolves the pending entry.
-  3. **Arduino UNO Q Tool** (Tool sub-node for the [Tools AI Agent](https://docs.n8n.io/integrations/builtin/cluster-nodes/root-nodes/n8n-nodes-langchain.agent/tools-agent/)) — exposes an MCU method as an LLM-invokable tool. **Scaffold only in v1** — the node registers with n8n so the package loads, but `supplyData` throws "not yet implemented". Real implementation is planned for v2 alongside the Respond node. See §6.4 for the intended design.
+  3. **Arduino UNO Q Respond** (Action node) — companion to Trigger's *Wait for Respond Node* mode. Reads the `_unoQRequest.msgid` envelope from its input, takes the entry from `PendingRequests`, and resolves (or rejects) the open MessagePack-RPC RESPONSE. See §6.6.
+  4. **Arduino UNO Q Tool** (Tool sub-node for the [Tools AI Agent](https://docs.n8n.io/integrations/builtin/cluster-nodes/root-nodes/n8n-nodes-langchain.agent/tools-agent/)) — exposes an MCU method as an LLM-invokable tool. **Scaffold only in v1** — the node registers with n8n so the package loads, but `supplyData` throws "not yet implemented". Real implementation is planned for v2. See §6.4 for the intended design.
 
-  Display names are prefixed with "Arduino UNO Q" so users searching the node picker for either "Arduino" or "UNO Q" find them. The internal `description.name` stays `unoQCall` / `unoQTrigger` / `unoQTool` — that's the ID serialized into workflow JSON and must not change once workflows reference it. `codex.alias` adds further search hits (Arduino, UNO Q, MCU, microcontroller, router, bridge).
+  Display names are prefixed with "Arduino UNO Q" so users searching the node picker for either "Arduino" or "UNO Q" find them. The internal `description.name` stays `unoQCall` / `unoQTrigger` / `unoQRespond` / `unoQTool` — that's the ID serialized into workflow JSON and must not change once workflows reference it. `codex.alias` adds further search hits (Arduino, UNO Q, MCU, microcontroller, router, bridge).
 - **Socket path** is a node-level parameter with default `/var/run/arduino-router.sock`, exposed under "Advanced options" so users rarely touch it. No n8n Credentials resource in v1 — see §6.5 for the rationale and when to add one.
 
 ### Critical design point: singleton client
@@ -227,6 +227,13 @@ packages/bridge/
 3. On deactivate, the trigger calls `manager.release()` — decrements `refCount`. When it hits zero the manager calls `bridge.close()`, which drops the socket. The router clears all registrations for the disconnected client automatically — no explicit `$/reset` or `$/unregister` call is sent.
 
 The `BridgeManager.methodRefs` map tracks per-method subscriber counts but currently nothing reads the `first`/`last` return values. It's kept for observability and as a hook for future per-method teardown if the Bridge ever grows a `bridge.stopProvide` / `bridge.unregister` method.
+
+**Lifecycle gotcha — deferred responses vs test-mode teardown:** n8n's "Listen for test event" calls the Trigger's `closeFunction` **before** running the downstream workflow with the captured emit. In deferred mode, the provide handler's Promise is still unresolved at that moment. Two bugs possible here, both seen in v1 dev:
+
+1. *Close immediately*: `bridge.close()` tears down the socket, the handler's eventual `transport.write(RESPONSE)` silently returns `false`, MCU hangs on `Bridge.call()`.
+2. *Await the drain inside release()*: the workflow can't run the Respond node until `closeFunction` returns — and `closeFunction` is waiting for a handler that can only resolve once Respond runs. **Deadlock** until the Trigger's own 30s timeout rejects the Promise; MCU gets a malformed error response and the Respond node errors with `No pending request for msgid N`.
+
+Fix: the Bridge tracks `activeHandlers` (in-flight provide invocations) and exposes `waitForActiveHandlers(timeoutMs)`; `BridgeManager.release()` **fires-and-forgets** the drain+close — returns synchronously to unblock n8n, lets the handler complete in the background, then closes the socket. The unit test `provide(): waitForActiveHandlers lets a deferred handler send its response before close` pins the drain mechanism in place at the Bridge level; the fire-and-forget rule is enforced by code comment in [BridgeManager.release](packages/n8n-nodes/src/BridgeManager.ts).
 
 **Critical:** this only works if all trigger nodes run in the same Node.js process. n8n's queue mode with separate worker processes would break the assumption — flag this as a known limitation for v1.
 
@@ -283,15 +290,16 @@ An earlier draft of this plan included a `UnoQ Credentials` resource as the stan
 
 Until any of those exists, keep it simple: socket path as a node parameter, no Credentials.
 
-### §6.6 Arduino UNO Q Respond (planned v2)
+### §6.6 Arduino UNO Q Respond
 
 Companion node to Trigger's *Request / Wait for Respond Node* mode. The Trigger holds the msgpack-rpc RESPONSE open; the Respond node closes it with a workflow-computed value. Same pattern as n8n's [Respond to Webhook](https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.respondtowebhook/) — just over the router socket instead of HTTP.
 
-**Mechanism:**
+**Mechanism (implemented in [UnoQRespond.node.ts](packages/n8n-nodes/src/nodes/UnoQRespond/UnoQRespond.node.ts)):**
 
-- The Trigger's `bridge.provide()` handler returns a `Promise<unknown>` that is stored in a process-wide **`PendingRequests`** singleton, keyed by the router-assigned msgid.
+- The Trigger's `bridge.provide()` handler returns a `Promise<unknown>` that is stored in the process-wide [PendingRequests](packages/n8n-nodes/src/PendingRequests.ts) singleton, keyed by the router-assigned msgid.
 - The Trigger emits the workflow item with a metadata envelope `_unoQRequest: { msgid, socketPath }` alongside the regular `method` / `params` fields.
-- The Respond node reads `$json._unoQRequest.msgid` from its input, looks up the pending entry, and calls `resolve(value)` (or `reject(message)`). The Bridge then sends the RESPONSE back to the MCU via the normal `provide` code path.
+- The Respond node reads `$json._unoQRequest.msgid` from its input, `take()`s the pending entry, clears its timeout timer, and calls `resolve(value)` (or `reject(message)`). The Bridge then sends the RESPONSE back to the MCU via the normal `provide` code path.
+- **Respond With** modes: *First Incoming Item* (sends the input JSON, with the envelope stripped by default), *JSON* (raw JSON expression), *Text* (plain string), *Error* (rejects the call — MCU-side `Bridge.call()` surfaces the message as a failure).
 - A node-side timeout (user-configurable on the Trigger, default 30s) rejects the pending entry with a clear error if no Respond node runs in time. This is belt-and-suspenders against the MCU-side `Bridge.call()` timeout and prevents `PendingRequests` from leaking.
 
 **Constraints and caveats:**
@@ -534,7 +542,7 @@ ssh arduino@linucs 'docker compose -f ~/n8n/docker-compose.yml exec n8n ls /home
 - [ ] Capitalization of the apps directory on my Q (`arduinoApps` / `ArduinoApps` / `Arduino Apps`). `ls /home/arduino/`.
 - [x] npm scope name — **`@raasimpact`** (decided and used throughout).
 - [ ] **Method introspection**: does any router version have a `$/methods` or equivalent endpoint that lists currently registered methods with metadata? If yes, Tool node config simplifies dramatically. If not (current state), manual config is fine for v1 but worth raising as a feature request upstream.
-- [ ] **Arduino UNO Q Respond node** (v2, §6.6): ship the companion to Trigger's *Wait for Respond Node* sub-mode. `PendingRequests` singleton is already in place — the Respond node just needs to read `_unoQRequest.msgid` and call `resolve`/`reject`.
+- [x] **Arduino UNO Q Respond node** (§6.6): shipped in v1 alongside Trigger's *Wait for Respond Node* sub-mode.
 - [ ] **Arduino UNO Q Tool node** (v2, §6.4): flesh out the current scaffold into a real `ai_tool` sub-node. `supplyData` must return a `DynamicStructuredTool` that wraps `bridge.call(method, params)`, with a per-tool description + parameter schema (zod or JSON Schema) configured by the user.
 
 ### Known risks

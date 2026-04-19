@@ -89,6 +89,13 @@ export class Bridge extends EventEmitter {
   /** Notification listeners, keyed by method name. Multiple handlers per method allowed. */
   private notifyHandlers = new Map<string, Set<NotifyHandler>>();
 
+  /**
+   * In-flight provide handler invocations. Each entry is the async IIFE that
+   * awaits the handler and writes the RESPONSE. Used by waitForActiveHandlers()
+   * so callers can drain pending work before closing the socket.
+   */
+  private activeHandlers = new Set<Promise<void>>();
+
   private connected = false;
 
   private constructor(private readonly options: BridgeOptions) {
@@ -199,15 +206,18 @@ export class Bridge extends EventEmitter {
       debug('recv', 'request', msgid, method);
       const handler = this.providers.get(method as string);
       if (handler) {
-        (async () => {
+        const task = (async () => {
           try {
             const result = await handler(params as unknown[], msgid as number);
-            this.transport.write(encodeResponse(msgid as number, null, result));
+            const ok = this.transport.write(encodeResponse(msgid as number, null, result));
+            if (!ok) debug('send', 'response dropped (socket closed)', msgid, method);
           } catch (err: unknown) {
             const message = err instanceof Error ? err.message : String(err);
             this.transport.write(encodeResponse(msgid as number, message, null));
           }
         })();
+        this.activeHandlers.add(task);
+        task.finally(() => this.activeHandlers.delete(task));
       }
     } else if (type === MSG_NOTIFY) {
       // Fire-and-forget from the MCU (e.g. button_pressed, sensor_threshold).
@@ -343,6 +353,34 @@ export class Bridge extends EventEmitter {
       } catch {
         this.emit('error', new BridgeError(`Failed to re-register "${method}" after reconnect`));
       }
+    }
+  }
+
+  /** Number of provide handler invocations that have not yet written their response. */
+  get activeHandlerCount(): number {
+    return this.activeHandlers.size;
+  }
+
+  /**
+   * Wait for all in-flight provide handlers to settle (send their RESPONSE),
+   * or until `timeoutMs` elapses — whichever comes first.
+   *
+   * Call this before close() when a handler may resolve asynchronously (e.g. a
+   * deferred n8n Respond flow). Without draining, close() tears down the socket
+   * while the handler is still awaiting — the subsequent transport.write silently
+   * fails and the caller never gets its RPC response.
+   */
+  async waitForActiveHandlers(timeoutMs: number): Promise<void> {
+    if (this.activeHandlers.size === 0) return;
+    const deadline = Date.now() + timeoutMs;
+    while (this.activeHandlers.size > 0) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return;
+      const timer = new Promise<void>((r) => setTimeout(r, remaining));
+      await Promise.race([
+        Promise.allSettled(Array.from(this.activeHandlers)),
+        timer,
+      ]);
     }
   }
 

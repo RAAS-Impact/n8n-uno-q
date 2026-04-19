@@ -15,6 +15,7 @@
     "nodes": [
       "dist/nodes/UnoQCall/UnoQCall.node.js",
       "dist/nodes/UnoQTrigger/UnoQTrigger.node.js",
+      "dist/nodes/UnoQRespond/UnoQRespond.node.js",
       "dist/nodes/UnoQTool/UnoQTool.node.js"
     ]
   },

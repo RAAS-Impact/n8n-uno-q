@@ -49,9 +49,20 @@ export class BridgeManager {
   async release(): Promise<void> {
     this.refCount--;
     if (this.refCount <= 0 && this.bridge) {
-      await this.bridge.close();
+      const oldBridge = this.bridge;
       this.bridge = null;
       this.refCount = 0;
+      // Fire-and-forget: in-flight provide handlers (e.g. UnoQTrigger deferred →
+      // UnoQRespond) must finish writing their RESPONSE before the socket closes,
+      // but we MUST NOT block the caller. n8n's "Listen for test event" awaits
+      // closeFunction on the same execution path that later needs to run the
+      // downstream UnoQRespond — blocking here deadlocks the workflow: Respond
+      // never runs, handler never resolves, drain never returns.
+      void oldBridge
+        .waitForActiveHandlers(60_000)
+        .catch(() => {})
+        .then(() => oldBridge.close())
+        .catch(() => {});
     }
   }
 

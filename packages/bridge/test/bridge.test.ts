@@ -219,6 +219,38 @@ describe('Bridge', () => {
       // We need to check differently — let's use a request waiter pattern instead
     });
 
+    it('waitForActiveHandlers lets a deferred handler send its response before close', async () => {
+      let resolveHandler!: (v: unknown) => void;
+      await bridge.provide('deferred_method', () => {
+        return new Promise((resolve) => {
+          resolveHandler = resolve;
+        });
+      });
+
+      // Drain $/register from received history so find() below doesn't pick up the wrong entry.
+      router.received.length = 0;
+
+      router.sendRequest(42, 'deferred_method', []);
+      await new Promise((r) => setTimeout(r, 50));
+      expect(bridge.activeHandlerCount).toBe(1);
+
+      // Resolve the handler from elsewhere (simulates UnoQRespond), then close.
+      // Without waitForActiveHandlers(), the microtask ordering combined with a
+      // close() that tears down the socket would drop the response.
+      setTimeout(() => resolveHandler('late-ok'), 100);
+      await bridge.waitForActiveHandlers(1000);
+      expect(bridge.activeHandlerCount).toBe(0);
+
+      // Yield once so the mock router can read the response bytes off the socket.
+      await new Promise((r) => setTimeout(r, 20));
+
+      const resp = router.received.find(
+        (m) => m[0] === 1 && (m as [number, number, unknown, unknown])[1] === 42,
+      );
+      expect(resp).toBeDefined();
+      expect((resp as [number, number, unknown, unknown])[3]).toBe('late-ok');
+    });
+
     it('handler errors become error responses', async () => {
       await bridge.provide('fail_method', () => {
         throw new Error('oops');

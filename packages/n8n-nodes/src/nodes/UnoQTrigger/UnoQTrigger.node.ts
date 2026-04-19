@@ -84,7 +84,7 @@ export class UnoQTrigger implements INodeType {
             name: 'Wait for Respond Node',
             value: 'deferred',
             description:
-              'Hold the RPC response open until an Arduino UNO Q Respond node sends a value. Requires the Respond node (planned v2); until then calls will time out.',
+              'Hold the RPC response open until an Arduino UNO Q Respond node sends a value. The workflow must reach a Respond node before the timeout.',
           },
         ],
       },
