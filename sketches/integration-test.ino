@@ -1,5 +1,5 @@
 /**
- * bridge-test.ino — MCU sketch for end-to-end validation of the Bridge package.
+ * integration-test.ino — MCU sketch for end-to-end validation of the Bridge package.
  *
  * Exposes multiple methods to exercise different RPC patterns:
  * - set_led_state(bool)   → write, returns null

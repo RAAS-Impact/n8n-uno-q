@@ -3,7 +3,7 @@
  *
  * Tests are split into two groups:
  *   - "router / Node-to-Node" — only need the router running, no specific MCU sketch
- *   - "MCU (bridge-test.ino)" — require sketches/bridge-test/bridge-test.ino to be flashed
+ *   - "MCU (integration-test.ino)" — require sketches/integration-test.ino to be flashed
  *
  * Usage (SSH tunnel from the PC):
  *   rm -f /tmp/arduino-router.sock && ssh -N -L /tmp/arduino-router.sock:/var/run/arduino-router.sock arduino@linucs.local &
@@ -68,7 +68,7 @@ describe.skipIf(SKIP)('router / Node-to-Node', () => {
   });
 });
 
-describe.skipIf(SKIP)('MCU (bridge-test.ino)', () => {
+describe.skipIf(SKIP)('MCU (integration-test.ino)', () => {
   let bridge: Bridge | undefined;
 
   afterEach(async () => {
@@ -108,7 +108,7 @@ describe.skipIf(SKIP)('MCU (bridge-test.ino)', () => {
     expect(Array.isArray(params)).toBe(true);
   }, 10_000);
 
-  it('gpio_event NOTIFY via fire_test_event (interrupt path)', async () => {
+  it('gpio_event via fire_test_event (interrupt → MCU Bridge.call path)', async () => {
     bridge = await connect();
     const trigger = await connect();
     try {
@@ -117,7 +117,9 @@ describe.skipIf(SKIP)('MCU (bridge-test.ino)', () => {
       const evPromise = new Promise<unknown[]>((res, rej) => { resolveEv = res; rejectEv = rej; });
       const timeout = setTimeout(() => rejectEv(new Error('no gpio_event within 2s')), 2000);
 
-      await bridge.onNotify('gpio_event', (p) => { clearTimeout(timeout); resolveEv(p); });
+      // The sketch sends `Bridge.call("gpio_event", 2)` from the MCU, so we
+      // must act as its handler (provide), not as a notify subscriber.
+      await bridge.provide('gpio_event', (p) => { clearTimeout(timeout); resolveEv(p); return null; });
       trigger.call('fire_test_event').catch((err: Error) => { clearTimeout(timeout); rejectEv(err); });
 
       const params = await evPromise;
