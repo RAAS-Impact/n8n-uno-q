@@ -18,7 +18,7 @@ function findNodeEntries(dir) {
 
 const entryPoints = findNodeEntries('src/nodes');
 
-// n8n-workflow is provided by the host n8n runtime; everything else
+// n8n-workflow is provided by the host n8n runtime. Everything else
 // (bridge, msgpack, BridgeManager, ...) is bundled into each .node.js
 // so the output is self-contained and doesn't need node_modules in custom/.
 await build({

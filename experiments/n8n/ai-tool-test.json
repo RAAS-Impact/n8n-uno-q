@@ -1,0 +1,260 @@
+{
+    "name": "Uno Q AI Tool Test",
+    "nodes": [
+        {
+            "parameters": {
+                "options": {}
+            },
+            "type": "@n8n/n8n-nodes-langchain.agent",
+            "typeVersion": 3.1,
+            "position": [
+                288,
+                0
+            ],
+            "id": "df93d55f-7efc-415e-8cdf-589ad78e6131",
+            "name": "AI Agent"
+        },
+        {
+            "parameters": {
+                "public": true,
+                "options": {}
+            },
+            "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+            "typeVersion": 1.4,
+            "position": [
+                0,
+                0
+            ],
+            "id": "c6e53fe9-cbb4-4029-8690-3826e50b1f80",
+            "name": "When chat message received",
+            "webhookId": "817d3b62-80a8-4212-afab-30eff4db10fe"
+        },
+        {
+            "parameters": {},
+            "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+            "typeVersion": 1.3,
+            "position": [
+                272,
+                224
+            ],
+            "id": "b600de45-4c28-4592-b4cd-7728c187480a",
+            "name": "Simple Memory"
+        },
+        {
+            "parameters": {
+                "options": {}
+            },
+            "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+            "typeVersion": 1,
+            "position": [
+                80,
+                224
+            ],
+            "id": "a68f4300-7ce2-491f-93a4-f9a98f9d1883",
+            "name": "Google Gemini Chat Model",
+            "credentials": {
+                "googlePalmApi": {
+                    "id": "ArD8xGCpqD5WNjYo",
+                    "name": "Google Gemini(PaLM) Api account"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "toolDescription": "Turns the onboard LED on or off. Pass true to switch it on, false to switch it off.",
+                "method": "set_led_state",
+                "parameters": {
+                    "parameter": [
+                        {
+                            "type": "boolean",
+                            "value": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('parameter0_Value', ``, 'string') }}"
+                        }
+                    ]
+                },
+                "options": {}
+            },
+            "type": "CUSTOM.unoQToolTool",
+            "typeVersion": 1,
+            "position": [
+                480,
+                384
+            ],
+            "id": "24ab84c5-dbe8-49d1-a724-54a8539fbb41",
+            "name": "Set internal LED"
+        },
+        {
+            "parameters": {
+                "toolDescription": "Turns the additional RGB LED on or off, also settiing the colors for red, green and blue. Pass an array of 3 boolean values for red, green and blue. Red, green and blue can be used in combinations to obtain other colors.\n\nExamples:\n- [true,false,true] => make the led red\n- [false,true,false] => make the red green\n",
+                "method": "set_rgb_state",
+                "parameters": {
+                    "parameter": [
+                        {
+                            "type": "json",
+                            "value": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('parameter0_Value', ``, 'string') }}"
+                        }
+                    ]
+                },
+                "options": {}
+            },
+            "type": "CUSTOM.unoQToolTool",
+            "typeVersion": 1,
+            "position": [
+                768,
+                272
+            ],
+            "id": "ce371239-d391-40a0-bfe5-79142ac4e7eb",
+            "name": "Set RGB LED"
+        },
+        {
+            "parameters": {
+                "toolDescription": "Check is the board is alive. Shall always return \"pong\".",
+                "method": "ping",
+                "parametersMode": "none",
+                "options": {}
+            },
+            "type": "CUSTOM.unoQToolTool",
+            "typeVersion": 1,
+            "position": [
+                336,
+                416
+            ],
+            "id": "c91cb485-1a9d-4bb6-badb-f3f79eb25129",
+            "name": "Ping the board"
+        },
+        {
+            "parameters": {
+                "toolDescription": "Reads the current state of the RGB led. Returns an array of boolean for red, green and blue.",
+                "method": "get_rgb_state",
+                "parametersMode": "none",
+                "options": {}
+            },
+            "type": "CUSTOM.unoQToolTool",
+            "typeVersion": 1,
+            "position": [
+                912,
+                192
+            ],
+            "id": "20994d34-7bcc-4ff9-9119-91d5e3689403",
+            "name": "Read RGB LED state"
+        },
+        {
+            "parameters": {
+                "toolDescription": "Get the current state of the onboard led",
+                "method": "get_led_state",
+                "parametersMode": "none",
+                "options": {}
+            },
+            "type": "CUSTOM.unoQToolTool",
+            "typeVersion": 1,
+            "position": [
+                624,
+                336
+            ],
+            "id": "46a3ef44-16c7-4928-b96b-6ca0ff60edbc",
+            "name": "Read internal LED state"
+        }
+    ],
+    "pinData": {},
+    "connections": {
+        "Simple Memory": {
+            "ai_memory": [
+                [
+                    {
+                        "node": "AI Agent",
+                        "type": "ai_memory",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "When chat message received": {
+            "main": [
+                [
+                    {
+                        "node": "AI Agent",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Google Gemini Chat Model": {
+            "ai_languageModel": [
+                [
+                    {
+                        "node": "AI Agent",
+                        "type": "ai_languageModel",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Set internal LED": {
+            "ai_tool": [
+                [
+                    {
+                        "node": "AI Agent",
+                        "type": "ai_tool",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Set RGB LED": {
+            "ai_tool": [
+                [
+                    {
+                        "node": "AI Agent",
+                        "type": "ai_tool",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Ping the board": {
+            "ai_tool": [
+                [
+                    {
+                        "node": "AI Agent",
+                        "type": "ai_tool",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Read RGB LED state": {
+            "ai_tool": [
+                [
+                    {
+                        "node": "AI Agent",
+                        "type": "ai_tool",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Read internal LED state": {
+            "ai_tool": [
+                [
+                    {
+                        "node": "AI Agent",
+                        "type": "ai_tool",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "active": false,
+    "settings": {
+        "executionOrder": "v1",
+        "binaryMode": "separate"
+    },
+    "versionId": "08b5be02-2a3b-4dce-ac04-59a4f5022045",
+    "meta": {
+        "templateCredsSetupCompleted": true,
+        "instanceId": "081d77cb7f62ef283b95ffe70ff8a5afc5f95f60e87cff8494e0562b04517b36"
+    },
+    "id": "yW4zAHEHPiYrmuEq",
+    "tags": []
+}

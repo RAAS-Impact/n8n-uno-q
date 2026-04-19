@@ -5,7 +5,7 @@ n8n community nodes for the [Arduino UNO Q](https://www.arduino.cc/), so that wo
 The repo ships two npm packages:
 
 - **[`@raasimpact/arduino-uno-q-bridge`](packages/bridge/)** — a pure Node.js MessagePack-RPC client for `arduino-router` (the Go service that runs on the Q). Zero external dependencies except `@msgpack/msgpack`. Useful on its own for anyone writing Node.js code on a UNO Q — Express, Fastify, Bun, raw scripts.
-- **[`n8n-nodes-uno-q`](packages/n8n-nodes/)** — an n8n community package that depends on the bridge and exposes three nodes: *Arduino UNO Q Call* (action), *Arduino UNO Q Trigger* (MCU → workflow events), and *Arduino UNO Q Tool* (callable by n8n's AI Agent tools, so an LLM can decide when to read a sensor or fire an actuator as part of reasoning).
+- **[`n8n-nodes-uno-q`](packages/n8n-nodes/)** — an n8n community package that depends on the bridge and exposes four nodes: *Arduino UNO Q Call* (action), *Arduino UNO Q Trigger* (MCU → workflow events), *Arduino UNO Q Respond* (companion to Trigger's deferred-response mode), and *Arduino UNO Q Method* (callable by n8n's AI Agent, so an LLM can decide when to read a sensor or fire an actuator as part of reasoning).
 
 ---
 
@@ -32,12 +32,30 @@ End-user flow, assuming a UNO Q out of the box (Docker preinstalled, `arduino-ro
    > The UNO Q boots n8n slowly — expect the page to throw connection errors for a minute or two after every `docker compose up`/`restart` while the container finishes initialising. Just reload. Hopefully much snappier on the upcoming VentUNO Q.
 5. **Install the community node from the UI:** *Settings → Community Nodes → Install a community node* → type `n8n-nodes-uno-q` → Install. n8n pulls the package (and the bridge as a transitive dependency) from npm and persists it in the `n8n_data` volume.
 
-Done. The *Arduino UNO Q Call*, *Arduino UNO Q Trigger*, and *Arduino UNO Q Tool* nodes are now available in the node picker (search "Arduino" or "UNO Q").
+Done. The *Arduino UNO Q Call*, *Arduino UNO Q Trigger*, *Arduino UNO Q Respond*, and *Arduino UNO Q Method* nodes are now available in the node picker (search "Arduino" or "UNO Q").
 
 **Updates:**
 
 - This package: click *Update* in the same Community Nodes page.
 - n8n itself: `docker compose pull && docker compose up -d` on the Q.
+
+### Advertised host for AI Chat and webhooks
+
+The compose file defaults `N8N_HOST` / `WEBHOOK_URL` to `linucs.local`, which is the hostname of the Q used during development of this package. If your Q answers on a different hostname or an IP, override it before bringing n8n up — otherwise the built-in **AI Chat** panel (and any Webhook/Chat Trigger node) will advertise an unreachable URL to the browser and fail with *"Failed to receive response"* without running any nodes.
+
+```bash
+# Option A — shell env, one-off
+N8N_HOST=myq.local WEBHOOK_URL=http://myq.local:5678/ docker compose up -d
+
+# Option B — persist via .env next to docker-compose.yml
+cat > .env <<EOF
+N8N_HOST=myq.local
+WEBHOOK_URL=http://myq.local:5678/
+EOF
+docker compose up -d
+```
+
+The hostname you set must be the one your **browser** uses to reach n8n — not the container's internal name.
 
 ---
 

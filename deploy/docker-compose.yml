@@ -17,6 +17,14 @@ services:
       # LAN access via http://<q-hostname>:5678 — no TLS terminator in front of n8n.
       # Put a reverse proxy with a cert in front if exposing beyond the local network.
       - N8N_SECURE_COOKIE=false
+      # Advertised URL for webhooks (Chat Trigger, Webhook nodes). Must be reachable
+      # from the browser — the default `localhost` breaks the chat UI when the editor
+      # is loaded over the LAN. Override via .env or shell env if linucs.local doesn't
+      # resolve on your network (use the Q's IP instead).
+      - N8N_HOST=${N8N_HOST:-linucs.local}
+      - N8N_PROTOCOL=http
+      - N8N_PORT=5678
+      - WEBHOOK_URL=${WEBHOOK_URL:-http://linucs.local:5678/}
 
 volumes:
   n8n_data:

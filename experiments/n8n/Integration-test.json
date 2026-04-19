@@ -66,6 +66,49 @@
       ],
       "id": "f3794c9f-5f7e-4936-9696-21b35ff142b4",
       "name": "Listen for MCU heartbeat"
+    },
+    {
+      "parameters": {
+        "method": "gpio_event",
+        "mode": "request",
+        "responseMode": "deferred",
+        "options": {}
+      },
+      "type": "CUSTOM.unoQTrigger",
+      "typeVersion": 1,
+      "position": [
+        -528,
+        608
+      ],
+      "id": "15bb10cf-ecbc-499a-813d-d1b7da03eec9",
+      "name": "React to button press"
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseText": "DAJEEEEE",
+        "options": {}
+      },
+      "type": "CUSTOM.unoQRespond",
+      "typeVersion": 1,
+      "position": [
+        -80,
+        608
+      ],
+      "id": "dc9289f3-f996-4130-882e-e6957673332c",
+      "name": "Respond to button press"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -304,
+        608
+      ],
+      "id": "b0de2312-6d4b-4103-a56b-b2cf240c8d7f",
+      "name": "Wait 5s",
+      "webhookId": "0875359a-a6ef-4431-821f-124fea5647cc"
     }
   ],
   "pinData": {},
@@ -79,6 +122,28 @@
       "main": [
         []
       ]
+    },
+    "React to button press": {
+      "main": [
+        [
+          {
+            "node": "Wait 5s",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 5s": {
+      "main": [
+        [
+          {
+            "node": "Respond to button press",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "active": false,
@@ -86,7 +151,7 @@
     "executionOrder": "v1",
     "binaryMode": "separate"
   },
-  "versionId": "16034a58-24d0-4b0c-96a9-f12e8d96dab6",
+  "versionId": "c5d65ad3-4502-4709-ac6e-1343e7f607b1",
   "meta": {
     "instanceId": "081d77cb7f62ef283b95ffe70ff8a5afc5f95f60e87cff8494e0562b04517b36"
   },

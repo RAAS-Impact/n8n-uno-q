@@ -211,7 +211,7 @@ packages/bridge/
      - *Notification* — subscribes via `bridge.onNotify`; fire-and-forget (`Bridge.notify()` on MCU). Multiple triggers can share the same method (Bridge-internal handler Set).
      - *Request* — subscribes via `bridge.provide`; handles `Bridge.call()` from MCU. Sub-mode **Response Mode** selects how the MCU gets its answer: *Acknowledge Immediately* returns a user-configurable ack right away and runs the workflow in parallel (v1 default); *Wait for Respond Node* holds the RPC response open until a UNO Q Respond node resolves it, analogous to n8n's Respond to Webhook. Only one trigger can own a Request method.
   3. **Arduino UNO Q Respond** (Action node) — companion to Trigger's *Wait for Respond Node* mode. Reads the `_unoQRequest.msgid` envelope from its input, takes the entry from `PendingRequests`, and resolves (or rejects) the open MessagePack-RPC RESPONSE. See §6.6.
-  4. **Arduino UNO Q Tool** (Tool sub-node for the [Tools AI Agent](https://docs.n8n.io/integrations/builtin/cluster-nodes/root-nodes/n8n-nodes-langchain.agent/tools-agent/)) — exposes an MCU method as an LLM-invokable tool. **Scaffold only in v1** — the node registers with n8n so the package loads, but `supplyData` throws "not yet implemented". Real implementation is planned for v2. See §6.4 for the intended design.
+  4. **Arduino UNO Q Method** (action node, `usableAsTool: true`) — exposes one MCU method as an LLM-invokable tool when connected to the [Tools AI Agent](https://docs.n8n.io/integrations/builtin/cluster-nodes/root-nodes/n8n-nodes-langchain.agent/tools-agent/)'s Tool port. Users drop one node per method they want the agent to have access to. See §6.4 for the design rationale. Display name intentionally omits "Tool" — n8n's wrapper appends it in the agent's tool list.
 
   Display names are prefixed with "Arduino UNO Q" so users searching the node picker for either "Arduino" or "UNO Q" find them. The internal `description.name` stays `unoQCall` / `unoQTrigger` / `unoQRespond` / `unoQTool` — that's the ID serialized into workflow JSON and must not change once workflows reference it. `codex.alias` adds further search hits (Arduino, UNO Q, MCU, microcontroller, router, bridge).
 - **Socket path** is a node-level parameter with default `/var/run/arduino-router.sock`, exposed under "Advanced options" so users rarely touch it. No n8n Credentials resource in v1 — see §6.5 for the rationale and when to add one.
@@ -237,31 +237,50 @@ Fix: the Bridge tracks `activeHandlers` (in-flight provide invocations) and expo
 
 **Critical:** this only works if all trigger nodes run in the same Node.js process. n8n's queue mode with separate worker processes would break the assumption — flag this as a known limitation for v1.
 
-### §6.4 Tool node design (for the AI Agent) — planned v2
-
-> **Status:** the current [UnoQTool.node.ts](packages/n8n-nodes/src/nodes/UnoQTool/UnoQTool.node.ts) is a scaffold that registers with n8n so the package loads cleanly; `supplyData` throws "not yet implemented". Everything below is the intended v2 design, not what ships in v1.
+### §6.4 Tool node design (for the AI Agent)
 
 The Tool node is what makes this project interesting beyond simple automation: an LLM driving the agent can call MCU functions as tools, reason about the results, and chain multiple hardware operations. Think "check the temperature, and if it's too high, turn on the fan" — expressed in natural language, resolved by the LLM choosing the right tools autonomously.
 
-**How n8n tool nodes work** (short primer so decisions below make sense):
+**The two tool-node patterns in n8n, and which one community packages are allowed to use:**
 
-- A tool is a sub-node connected to a Tools Agent root node via the `ai_tool` connection type.
-- Each tool exposes to the LLM: a **name**, a **natural-language description** of what it does, and a **parameter schema** (JSON Schema-ish) describing inputs.
-- At runtime, the LLM decides which tool to call and with which parameters. n8n supports the `$fromAI()` expression so tool parameters can be filled dynamically by the LLM — see [Dynamic parameters for tools with $fromAI()](https://docs.n8n.io/integrations/builtin/cluster-nodes/root-nodes/n8n-nodes-langchain.agent/tools-agent/#dynamic-parameters-for-tools-with-fromai).
-- The tool node executes, returns a result, and the LLM continues reasoning with it in context.
+n8n has two ways a node can appear to an AI Agent as a tool:
 
-**Key design choice: one tool = one MCU method (not one generic tool).**
+1. **`supplyData` + `outputs: [NodeConnectionTypes.AiTool]`** — a pure sub-node with no `execute`. Used by stock `@n8n/nodes-langchain` nodes (ToolCode, McpClientTool, ToolHttpRequest, …).
+2. **`usableAsTool: true` on a regular `Main→Main` node with `execute()`** — a dual-purpose node that runs normally in non-AI workflows, and gets auto-wrapped as a LangChain tool when connected to an Agent's Tool port.
 
-We could build a single "UnoQ Tool" that takes method name as a parameter and lets the LLM pick whatever. **Don't.** Discrete tools with narrow, well-described purposes are what LLMs handle well. A generic "call any method" tool tempts the LLM into hallucinating method names, misusing it as a shell, and producing opaque errors. Instead, the user adds one UnoQ Tool node per method they want the LLM to have access to — each with:
+**Community (`CUSTOM.`-prefixed) packages can only use pattern 2.** n8n's execution engine silently misroutes `supplyData`-only community nodes onto the main graph, which throws *"has a 'supplyData' method but no 'execute' method"* at runtime. This is confirmed by [n8n PR #26007](https://github.com/n8n-io/n8n/pull/26007) and by inspection of every maintained community tool package on npm ([nerding-io/n8n-nodes-mcp](https://github.com/nerding-io/n8n-nodes-mcp) is the canonical example — it uses pattern 2 exclusively). Requires `N8N_COMMUNITY_PACKAGES_ALLOW_TOOL_USAGE=true` on the n8n process.
 
-- **Name** — the MCU method (e.g. `set_led_state`, `read_temperature`).
+**We picked this up the hard way.** An earlier implementation copied ToolCode/McpClientTool (pattern 1) and worked cleanly at build time but failed at runtime with exactly the error above. The design below uses pattern 2.
+
+**Shape: `usableAsTool: true`, one node = one MCU method.**
+
+UnoQTool is essentially UnoQCall with `usableAsTool: true` and an added `toolDescription` field. It has main I/O; in a classic workflow it behaves like Call. When dropped onto an Agent's Tool port, n8n auto-wraps `execute()` into a DynamicStructuredTool for the LLM.
+
 - **Description** — plain-English, action-oriented, written for the LLM to read. E.g. *"Turns the onboard LED on or off. Pass `true` to turn on, `false` to turn off."* This is the single most important field for tool usability. Bad descriptions = bad LLM decisions.
-- **Parameter schema** — list of parameters with name, type, description, and whether required. Used both for n8n UI validation and for what the LLM sees when deciding how to call.
-- **Safety gate (optional but recommended default)** — a checkbox "Require human review for this tool call" that surfaces the call for confirmation before execution. For anything physical (motors, heaters, high-voltage), default this to on. See n8n's [Human review for tool calls](https://docs.n8n.io/integrations/builtin/cluster-nodes/root-nodes/n8n-nodes-langchain.agent/tools-agent/#human-review-for-tool-calls).
+- **Method** — the MCU method (e.g. `set_led_state`, `read_temperature`). Static per node instance.
+- **Parameters** — typed fields or raw JSON array, same UI as UnoQCall. The LLM fills fields whose value contains `$fromAI('name', 'desc', 'type')`; static values pass through unchanged. n8n scans parameter expressions for `$fromAI(...)` calls and builds the tool's input schema from them — no zod, no JSON schema, no langchain dep on our side.
+- **Options** — timeout, socket path. Same as Call.
 
-**Implementation detail:** the Tool node extends the same underlying client as the Call node — under the hood it's still `bridge.call(method, params)`. The novelty is the n8n class hierarchy (tool sub-node with `ai_tool` output) and the per-tool metadata (description, schema) used by the LLM.
+**Why one node = one method and not "configure N methods in one node":**
 
-**What about method discovery?** Ideally the user would configure one tool and it auto-populates name/schema from the MCU. For v1: no. The router has no `$/methods` introspection endpoint that I've found, and the MCU's registered methods are declared imperatively at `setup()` with no metadata beyond the name. Configuration is manual per tool. This is an open item worth revisiting (see §8) — if Arduino ever adds introspection, we collapse the Tool node config to "pick from dropdown of registered methods." Until then, users type in method name + description + schema.
+- **HITL granularity.** n8n's human-in-the-loop is configured *on the agent↔tool connector* in the UI. With per-method nodes, users can gate `set_motor_speed` on approval while leaving `read_temperature` free. This alone is decisive for any workflow touching actuators.
+- **Canvas visibility.** Each tool appears as a distinct node with its own name, icon, and connector — reviewers of a workflow see at a glance what the agent can do.
+- **Error isolation.** A misconfigured method doesn't take out the others.
+- **Matches the idiom.** Every stock community tool node is one-tool-one-node.
+
+**Why not "one generic UnoQ Tool that takes a method name"?** Discrete tools with narrow, well-described purposes are what LLMs handle well. A generic "call any method" tool tempts the LLM into hallucinating method names, misusing it as a shell, and producing opaque errors.
+
+**Why a separate Tool node and not just `usableAsTool: true` on UnoQCall?** Discoverability. A user browsing the AI → Tools category of the node picker should find an "Arduino UNO Q Method" clearly labelled as the AI-agent entry point — not have to know that UnoQCall happens to also work. The ~80 lines of UI duplication are a small price for that affordance.
+
+**Why "Method" and not "Tool" in the display name?** n8n's `usableAsTool` wrapper appends " Tool" to the node's label in the agent's tool list. Calling the node "Arduino UNO Q Tool" would render as "Arduino UNO Q Tool Tool". "Method" is accurate (one MCU method = one node) and composes cleanly to "Arduino UNO Q Method Tool" in the wrapped view.
+
+**Implementation notes:**
+
+- `BridgeManager.getBridge()` is used (not `acquire`/`release`) — the Tool node is short-lived like Call, doesn't own a subscription, and shouldn't participate in the refcount lifecycle.
+- No extra peer deps beyond `n8n-workflow`. The langchain/zod wrapping happens inside n8n itself when it auto-wraps the node.
+- `execute()` reads parameters via `getNodeParameter` just like Call — `$fromAI()` expressions have already been resolved by the n8n expression evaluator by the time we see the values.
+
+**What about method discovery?** Ideally the user would configure one tool and it auto-populates name/schema from the MCU. For v1: no. The router has no `$/methods` introspection endpoint that I've found, and the MCU's registered methods are declared imperatively at `setup()` with no metadata beyond the name. Configuration is manual per method. This is an open item worth revisiting (see §8) — if Arduino ever adds introspection, we collapse the Methods UI to "pick from dropdown of registered methods." Until then, users type in method name + description + parameters.
 
 **Docstring convention (soft recommendation for MCU sketch style):**
 
@@ -320,215 +339,37 @@ Companion node to Trigger's *Request / Wait for Respond Node* mode. The Trigger 
 - Clear error messages when socket not accessible (missing bind-mount, permissions).
 - Trigger nodes must survive bridge reconnection transparently.
 - Tool node descriptions must appear verbatim in the LLM's view of available tools (no auto-prefixing with "UnoQ —" or similar — preserve the exact user-written description).
-- Documentation with **two** working example workflows (exported JSON): (a) Action + Trigger in a classic automation flow, (b) Tools Agent using at least two UnoQ Tools to demonstrate LLM-driven hardware control.
+- Documentation with **two** working example workflows (exported JSON): (a) Action + Trigger in a classic automation flow, (b) Tools Agent using at least two UnoQ Method nodes to demonstrate LLM-driven hardware control.
 
 ---
 
-## 7. Dev workflow: master on PC, deploy on UNO Q
+## 7. Dev workflow architecture: decisions
 
-Decision: **source of truth lives on PC**, git repo local, sync to UNO Q for testing.
+> Procedures, commands, testing layers, and triage live in [CLAUDE.md](CLAUDE.md). This section captures only the *decisions* behind them, so they aren't repeatedly re-questioned.
 
-### Project layout on PC
+### Monorepo on npm workspaces
 
-```
-~/projects/n8n-uno-q/                   # single git repo (monorepo), or two repos — TBD
-├── CONTEXT.md                          # this file
-├── packages/
-│   ├── bridge/                         # @raasimpact/arduino-uno-q-bridge
-│   └── n8n-nodes/                      # n8n-nodes-uno-q
-├── deploy/
-│   ├── docker-compose.yml              # n8n + volumes for testing on the Q
-│   ├── Dockerfile                      # custom n8n image with our nodes baked in
-│   └── sync.sh                         # rsync script
-├── experiments/
-│   └── test-router.mjs                 # the smoke test we already validated
-└── sketches/
-    └── integration-test.ino            # MCU sketch used by the bridge integration suite
-```
+Single git repo with `packages/bridge` and `packages/n8n-nodes`, managed by npm workspaces. Settled on npm (not pnpm) because the n8n community nodes tooling is friendlier to plain `npm`. Split into separate repos later if the bridge package gets independent uptake.
 
-Monorepo (single repo with `packages/`) using npm workspaces. Settled on npm (not pnpm) because the n8n community nodes workflow is friendlier to plain `npm` — split later if the bridge package gets independent uptake.
+### Source of truth lives on PC
 
-### Sync to UNO Q
+App Lab is a **remote editor**: source code lives on the UNO Q, not on the PC. A firmware update **wipes all user apps** — including any App Lab-hosted sketch. → Git on the PC is the source of truth, always. Treat the MCU sketch the same way: commit it to [sketches/](sketches/) even though App Lab can edit it in place.
 
-Use `rsync` over SSH. Assumes SSH already works (username `arduino`, hostname `linucs` or the IP). The script below implements **Pattern A** (see "How n8n sees our packages" below): sync the built `dist/` folders into `deploy/custom/` on the Q and restart the container. No image rebuild.
+### Node never runs directly on the UNO Q
 
-See [deploy/sync.sh](deploy/sync.sh) for the real script. In shape:
+Node.js is not installed on the Q outside of containers. All Node-based testing happens either via an SSH-tunneled Unix socket (bridge unit/integration tests from the PC) or inside the n8n container on the Q (n8n-node testing). Never reference `/var/run/arduino-router.sock` as a path in PC-side commands — that path only exists on the Q and inside containers with the socket bind-mounted. Tunnel it and use `/tmp/arduino-router.sock`.
 
-```bash
-# deploy/sync.sh — shape (see the real file for the current version)
-#!/usr/bin/env bash
-set -euo pipefail
-HOST="${UNOQ_HOST:-arduino@linucs.local}"
-REMOTE_DIR="${UNOQ_DIR:-/home/arduino/n8n}"
+### How n8n sees our packages — Pattern A (dev) and Pattern C (prod)
 
-# Build on PC (npm workspaces)
-npm run build
+n8n loads community nodes from `/home/node/.n8n/custom/`. Any npm package in there whose `package.json` declares an `"n8n"` entry point is discovered at startup. We use two patterns:
 
-# Sync the deploy dir (docker-compose files, etc.)
-rsync -av --delete \
-  --exclude node_modules --exclude .git --exclude custom \
-  ./deploy/ "$HOST:$REMOTE_DIR/"
+**Pattern A — bind-mount for dev loop.** [deploy/sync.sh](deploy/sync.sh) builds locally, rsyncs `packages/*/dist` to `custom/packages/*/` on the Q, and restarts n8n with a dev-only compose override that bind-mounts that folder. No image rebuild, no `npm publish`. `sync.sh` wipes `custom/packages` before each sync so stale files from earlier layouts don't get picked up by n8n's recursive `.node.js` scan.
 
-# Wipe stale bundles first — n8n scans custom/ recursively for *.node.js and
-# would otherwise load leftovers from previous layouts alongside the new ones.
-ssh "$HOST" "rm -rf $REMOTE_DIR/custom/packages && \
-  mkdir -p $REMOTE_DIR/custom/packages/bridge/dist $REMOTE_DIR/custom/packages/n8n-nodes/dist"
+**Pattern C — GUI install from inside n8n (production).** Settings → Community Nodes → Install `n8n-nodes-uno-q`. n8n pulls it from npm with the bridge as a transitive dependency and persists it in the `n8n_data` volume. Updates are one click. This is the shipping story: a user who grabs `deploy/docker-compose.yml` runs `docker compose up -d` and installs the node from the UI. No build on the Q, no cross-arch image rebuild, no bind-mount.
 
-# Sync package.json + dist/ for each package (package.json carries the "n8n" entry).
-rsync -av packages/bridge/package.json    "$HOST:$REMOTE_DIR/custom/packages/bridge/"
-rsync -av packages/bridge/dist/           "$HOST:$REMOTE_DIR/custom/packages/bridge/dist/"
-rsync -av packages/n8n-nodes/package.json "$HOST:$REMOTE_DIR/custom/packages/n8n-nodes/"
-rsync -av packages/n8n-nodes/dist/        "$HOST:$REMOTE_DIR/custom/packages/n8n-nodes/dist/"
+**Why not a custom Docker image (Pattern B)?** Earlier drafts had a Dockerfile that baked `npm install -g n8n-nodes-uno-q` on top of `n8nio/n8n:latest`. Rejected: building that image on a Mac for the UNO Q's arch requires either buildx cross-compilation or building on the Q itself — both fragile, both avoidable once the package is on npm and Pattern C exists.
 
-# Apply the dev override (bind-mount ./custom) and restart n8n to re-scan.
-ssh "$HOST" "cd $REMOTE_DIR && \
-  docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d n8n && \
-  docker compose -f docker-compose.yml -f docker-compose.dev.yml restart n8n"
-```
-
-### Installing n8n on the Q (first time)
-
-App Lab is not involved — we install n8n as a plain Docker service, managed by `docker compose` from the board's shell. Docker is pre-installed on the Q and the `arduino` user is in the `docker` group (the Docker socket shows `srw-rw---- docker`), so `sudo` is unnecessary.
-
-```bash
-mkdir -p ~/n8n && cd ~/n8n
-# Place docker-compose.yml here (see skeleton below)
-docker compose up -d
-# n8n is now on http://<q-ip>:5678 — first load redirects to /setup to create the owner account.
-```
-
-Once the deploy/sync pipeline is running, this becomes a one-time bootstrap — further changes flow through `sync.sh`.
-
-### docker-compose skeleton for running n8n on the Q
-
-Two files, layered: the base is prod-ready, dev layers a bind-mount on top.
-
-`deploy/docker-compose.yml` (prod base — also what a clean clone gets):
-
-```yaml
-services:
-  n8n:
-    image: n8nio/n8n:latest
-    restart: unless-stopped
-    ports:
-      - "5678:5678"
-    volumes:
-      - /var/run/arduino-router.sock:/var/run/arduino-router.sock
-      - n8n_data:/home/node/.n8n               # workflows + credentials persistence
-    environment:
-      # Auth is handled by n8n's built-in user management — /setup on first launch.
-      - GENERIC_TIMEZONE=Europe/Malta
-      - TZ=Europe/Malta
-      - N8N_COMMUNITY_PACKAGES_ENABLED=true
-      - N8N_COMMUNITY_PACKAGES_ALLOW_TOOL_USAGE=true   # mandatory for UnoQTool (AI-agent tool node)
-      - N8N_SECURE_COOKIE=false                        # LAN-only access over HTTP; remove if fronted by TLS
-
-volumes:
-  n8n_data:
-```
-
-`deploy/docker-compose.dev.yml` (dev override — adds the Pattern A bind-mount):
-
-```yaml
-services:
-  n8n:
-    volumes:
-      - ./custom:/home/node/.n8n/custom:ro
-```
-
-Dev runs: `docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d` (sync.sh does this automatically). Prod runs: plain `docker compose up -d`.
-
-**Gotcha:** without the `n8n_data` volume, every restart wipes workflows *and* the community nodes installed from the UI. Don't skip it.
-
-### How n8n sees our packages
-
-n8n loads community nodes from `/home/node/.n8n/custom/`. Any npm package in there whose `package.json` declares an `"n8n"` entry point is discovered at startup. We use two patterns — one for dev, one for prod:
-
-**Pattern A — bind-mount for dev loop.** Build the packages on PC into `packages/*/dist`, rsync `package.json` + `dist/` to `deploy/custom/packages/*/` on the Q, bind-mount that folder into the container via `docker-compose.dev.yml`. `sync.sh` wipes `custom/packages` before each sync so stale files from earlier layouts don't get picked up by n8n's recursive `.node.js` scan.
-
-After an `rsync + docker compose restart n8n`, the new nodes appear in the UI. No image rebuild.
-
-**Each node file is a self-contained CJS bundle.** Under Pattern A there's no `npm install` in `custom/`, so the node can't rely on `node_modules` being there to resolve `@raasimpact/arduino-uno-q-bridge` or `@msgpack/msgpack` at load time. `packages/n8n-nodes/scripts/build.mjs` uses **esbuild** to bundle each `*.node.ts` into a standalone CJS file with the bridge and msgpack inlined; `n8n-workflow` is the only external (provided by the n8n runtime). Side effects worth remembering:
-
-- Each `*.node.js` has its own bundled copy of `BridgeManager`, so the module-level singleton would not actually be shared across nodes. `BridgeManager.getInstance()` stashes the instance on `globalThis` under a `Symbol.for(...)` key to make it a true process-wide singleton.
-- Removing `"type":"module"` from `packages/n8n-nodes/package.json` is what makes Node treat the bundled `.js` as CJS (so the `require("n8n-workflow")` resolves via the normal Node CJS lookup chain inside the container).
-- TypeScript runs as `tsc --noEmit` only (pure typecheck). esbuild owns the emit.
-
-**Pattern C — GUI install from inside n8n (production).** Settings → Community Nodes → Install `n8n-nodes-uno-q`. n8n pulls it from npm along with the bridge as a transitive dependency, and persists the install inside the `n8n_data` volume. Updates are a one-click affair from the same UI.
-
-This is the shipping story: a user who clones the repo (or just grabs `deploy/docker-compose.yml` on its own) runs `docker compose up -d` and installs the node from the UI. No build on the Q, no cross-arch image rebuild from a Mac dev box, no bind-mount.
-
-**Why not a custom Docker image?** Earlier drafts had a "Pattern B" where `Dockerfile` baked `npm install -g n8n-nodes-uno-q` on top of `n8nio/n8n:latest`. Rejected: building that image on a Mac for the UNO Q's arch requires either buildx cross-compilation or building on the Q itself — both fragile, both avoidable once the package is on npm and Pattern C exists.
-
-### Node never runs directly on the Q
-
-Node.js is not installed on the UNO Q outside of containers. All Node-based testing happens either:
-
-- **SSH tunnel** (bridge/integration tests from the PC):
-  ```bash
-  rm -f /tmp/arduino-router.sock && ssh -N -L /tmp/arduino-router.sock:/var/run/arduino-router.sock arduino@linucs.local &
-  UNOQ_SOCKET=/tmp/arduino-router.sock npm run test:integration -w packages/bridge
-  ```
-- **n8n container on the Q** (for n8n node testing) — via the deploy pipeline below.
-
-Never reference `/var/run/arduino-router.sock` as a path in test commands or scripts run from the PC; that path only exists on the Q and in containers with the socket bind-mounted.
-
-### Testing loop
-
-1. Edit code on PC in Claude Code.
-2. `pnpm build` locally (catches type errors fast).
-3. `./deploy/sync.sh` pushes the new `dist/` to the Q and restarts the n8n container.
-4. Browser to `http://<uno-q-ip>:5678`, test workflow.
-5. MCU sketch changes: edit in App Lab (or via arduino-cli), redeploy separately — the sketch is independent of the n8n container.
-
-### Debug flow: isolate by layer
-
-When something stops working, don't guess. Walk from the lowest layer up; the first layer that fails is where the bug lives. Six layers:
-
-**Layer 0 — MCU sketch.** Add `Serial.println()` traces inside your bridged functions and watch them from App Lab's serial console, or `arduino-cli monitor` on a side terminal. Don't monitor `/dev/ttyHS1` — that's the router's exclusive channel. If you need a second serial output for debug, route it on a different UART.
-
-**Layer 1 — router reachable.** The smoke test already in `experiments/test-router.mjs` is the canary. If it no longer prints `[1, 1, null, '<version>']`, the problem is lower than your code: router crashed, socket permissions changed, container can't reach the socket. `ssh arduino@linucs "sudo systemctl status arduino-router"` and `ls -la /var/run/arduino-router.sock` sort this out.
-
-**Layer 2 — bridge package.** Two tiers of tests:
-
-- **Unit** (fast, CI-friendly): mock transport, no real socket. Test msgid allocation, timeout handling, reconnect backoff, error propagation.
-- **Integration** (manual, against the real Q): `pnpm --filter bridge test:integration`. Covers register/call/notify round-trips, socket disconnect behaviour, multiple concurrent calls.
-
-**Layer 3 — n8n nodes on PC (no Q in the loop).** You don't need to deploy to the Q to debug node UI, schema validation, or trigger refcounting. Run n8n locally pointing at a mock:
-
-```bash
-pnpm --filter n8n-nodes build
-N8N_CUSTOM_EXTENSIONS=/abs/path/to/packages/n8n-nodes/dist npx n8n start
-```
-
-The socket isn't available on the PC. Two options:
-
-- **SSH tunnel the socket:** `rm -f /tmp/arduino-router.sock && ssh -N -L /tmp/arduino-router.sock:/var/run/arduino-router.sock arduino@linucs.local &`, then configure the node to use `/tmp/arduino-router.sock`. Higher latency but end-to-end realism.
-- **Local mock router:** a ~50-line Node.js script that speaks msgpack-rpc and returns canned responses. Faster iteration, no Q required. Worth writing once and committing under `experiments/mock-router.mjs`.
-
-**Layer 4 — n8n in the container on the Q.** Only after layer 3 is clean. Bugs here are typically bind-mount paths, permissions, env vars.
-
-```bash
-ssh arduino@linucs 'docker compose -f ~/n8n/docker-compose.yml logs -f n8n'
-# In another window, exec into the container to inspect:
-ssh arduino@linucs 'docker compose -f ~/n8n/docker-compose.yml exec n8n ls /home/node/.n8n/custom'
-```
-
-**Layer 5 — Tools Agent with a real LLM.** Last layer because it's non-deterministic and costs tokens. Recommendations:
-
-- Use a local LLM via Ollama for the dev loop — free, offline, fine for testing tool-calling behaviour. Reserve paid models (Claude, GPT) for final polish.
-- Enable `Return Intermediate Steps` on the agent node to see the reasoning trace — most bugs here are "the LLM didn't know when to call the tool" and the fix is in the tool description, not the code.
-- When the LLM picks wrong tools or wrong params, rewrite the description before touching the code. 90% of agent debugging is prose.
-
-### Fast-triage cheat sheet
-
-| Symptom | First check |
-|---|---|
-| Nodes don't appear in n8n UI | Layer 4: is `./custom` bind-mounted and does `ls` show your package? Is the `"n8n"` entry point declared in `package.json`? |
-| "Cannot connect to socket" | Layer 1: is the socket there and `rw` for all? Layer 4: is it bind-mounted into the container? |
-| Call returns "method not available" | Layer 0: is the sketch actually running and has the MCU rebooted since you last changed `Bridge.provide(...)`? |
-| Trigger fires twice for one MCU event | Layer 3: singleton refcount bug — two trigger nodes registered the same method. |
-| Agent ignores tools that should obviously apply | Layer 5: rewrite the tool description in active voice, start with a verb, include an example. |
+**Implementation consequence:** because each `*.node.js` ends up a self-contained CJS bundle with its own copy of shared modules (esbuild inlines everything except the n8n-runtime externals), `BridgeManager.getInstance()` must stash the singleton on `globalThis` under a `Symbol.for(...)` key — otherwise each node would see its own `BridgeManager` and the refcount invariant would break. Mechanics in [CLAUDE.md § Dev loop](CLAUDE.md).
 
 ---
 
@@ -543,7 +384,7 @@ ssh arduino@linucs 'docker compose -f ~/n8n/docker-compose.yml exec n8n ls /home
 - [x] npm scope name — **`@raasimpact`** (decided and used throughout).
 - [ ] **Method introspection**: does any router version have a `$/methods` or equivalent endpoint that lists currently registered methods with metadata? If yes, Tool node config simplifies dramatically. If not (current state), manual config is fine for v1 but worth raising as a feature request upstream.
 - [x] **Arduino UNO Q Respond node** (§6.6): shipped in v1 alongside Trigger's *Wait for Respond Node* sub-mode.
-- [ ] **Arduino UNO Q Tool node** (v2, §6.4): flesh out the current scaffold into a real `ai_tool` sub-node. `supplyData` must return a `DynamicStructuredTool` that wraps `bridge.call(method, params)`, with a per-tool description + parameter schema (zod or JSON Schema) configured by the user.
+- [x] **Arduino UNO Q Method node** (§6.4): implemented. `usableAsTool: true` Main→Main node with `execute()`; one node = one MCU method; LLM-filled parameters via `$fromAI()`. (Class/dir still named UnoQTool for workflow-JSON stability.)
 
 ### Known risks
 
@@ -627,12 +468,8 @@ Router version at time of testing: **0.8.0**.
 
 ---
 
-## 11. Conventions for Claude Code
+## 11. Project-level decisions
 
-- **Language:** TypeScript for both packages. Source in `src/`, build to `dist/`.
-- **Style:** ESLint + Prettier with defaults, no bikeshedding.
-- **Tests:** Vitest. At least smoke coverage before each publish.
-- **Commits:** Conventional Commits (`feat:`, `fix:`, `chore:`, `docs:`). Helps if we later adopt Changesets for versioning.
 - **Versioning:** start at `0.1.0`. Semver strict once we hit `1.0.0`.
 - **License:** MIT (revisit if Arduino's GPL router imposes anything on a protocol-level client — it shouldn't, but worth a quick legal sanity check before first publish).
-- **Update this file** whenever a decision changes. Don't let it go stale.
+- **Update this file** whenever a decision changes. Don't let it go stale. Procedures, commands, and style conventions live in [CLAUDE.md](CLAUDE.md); update them there.
