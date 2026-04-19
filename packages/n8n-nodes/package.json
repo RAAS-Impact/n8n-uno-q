@@ -1,7 +1,7 @@
 {
   "name": "n8n-nodes-uno-q",
   "version": "0.1.0",
-  "description": "n8n community nodes for Arduino UNO Q",
+  "description": "n8n community nodes for the Arduino UNO Q — read sensors, drive GPIO, react to MCU events, and expose MCU methods as AI Agent tools.",
   "files": [
     "dist"
   ],
@@ -20,7 +20,7 @@
     ]
   },
   "dependencies": {
-    "@raasimpact/arduino-uno-q-bridge": "*"
+    "@raasimpact/arduino-uno-q-bridge": "^0.1.0"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
@@ -32,5 +32,33 @@
   "peerDependencies": {
     "n8n-workflow": ">=1.0.0"
   },
-  "license": "MIT"
+  "keywords": [
+    "n8n-community-node-package",
+    "n8n",
+    "arduino",
+    "arduino-uno-q",
+    "uno-q",
+    "mcu",
+    "iot",
+    "gpio",
+    "i2c",
+    "ai-agent",
+    "tools-agent",
+    "messagepack-rpc",
+    "arduino-router"
+  ],
+  "author": "Lino Moretto <lino.moretto@gmail.com>",
+  "license": "MIT",
+  "homepage": "https://github.com/raasimpact/n8n-uno-q#readme",
+  "bugs": {
+    "url": "https://github.com/raasimpact/n8n-uno-q/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/raasimpact/n8n-uno-q.git",
+    "directory": "packages/n8n-nodes"
+  },
+  "engines": {
+    "node": ">=20"
+  }
 }

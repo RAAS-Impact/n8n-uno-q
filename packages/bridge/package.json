@@ -1,7 +1,7 @@
 {
   "name": "@raasimpact/arduino-uno-q-bridge",
   "version": "0.1.0",
-  "description": "MessagePack-RPC client for the Arduino UNO Q router",
+  "description": "Pure Node.js MessagePack-RPC client for the Arduino UNO Q router — read sensors, drive GPIO, and react to async MCU events from any Node.js process.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -28,5 +28,32 @@
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
   },
-  "license": "MIT"
+  "keywords": [
+    "arduino",
+    "arduino-uno-q",
+    "uno-q",
+    "arduino-router",
+    "messagepack-rpc",
+    "msgpack-rpc",
+    "msgpack",
+    "mcu",
+    "iot",
+    "unix-socket",
+    "rpc",
+    "bridge"
+  ],
+  "author": "Lino Moretto <lino.moretto@gmail.com>",
+  "license": "MIT",
+  "homepage": "https://github.com/raasimpact/n8n-uno-q#readme",
+  "bugs": {
+    "url": "https://github.com/raasimpact/n8n-uno-q/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/raasimpact/n8n-uno-q.git",
+    "directory": "packages/bridge"
+  },
+  "engines": {
+    "node": ">=20"
+  }
 }
