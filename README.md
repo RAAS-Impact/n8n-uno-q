@@ -111,7 +111,11 @@ Then in your working terminal:
 UNOQ_SOCKET=/tmp/arduino-router.sock npm run test:integration -w packages/bridge
 ```
 
-Some tests in [packages/bridge/test/integration.test.ts](packages/bridge/test/integration.test.ts) additionally require the [sketches/integration-test.ino](sketches/integration-test.ino) firmware flashed on the board.
+Some tests in [packages/bridge/test/integration.test.ts](packages/bridge/test/integration.test.ts) additionally require the [sketches/integration-test.ino](sketches/integration-test.ino) firmware flashed on the board. The sketch depends on these Arduino libraries — install them via the IDE's Library Manager before flashing:
+
+- **`Arduino_RouterBridge`** (by Arduino) — MsgPack-RPC bridge to `arduino-router`.
+- **`Arduino_LED_Matrix`** (by Arduino) — drives the on-board 8×13 LED matrix.
+- **`ArduinoJson`** (by Benoît Blanchon) — used by `printBridgeReply()` to render any RPC return type as JSON. Note: this is **not** the similarly named `Arduino_JSON` library.
 
 ---
 
