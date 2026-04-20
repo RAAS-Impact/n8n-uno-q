@@ -6,5 +6,5 @@
  * from internal modules.
  */
 export { Bridge } from './bridge.js';
-export type { BridgeOptions, ConnectOptions, ReconnectOptions, ProvideHandler, NotifyHandler } from './bridge.js';
+export type { BridgeOptions, CallOptions, ConnectOptions, ReconnectOptions, ProvideHandler, NotifyHandler } from './bridge.js';
 export { BridgeError, TimeoutError, ConnectionError, MethodNotAvailableError } from './errors.js';

@@ -330,6 +330,189 @@ describe('Bridge', () => {
   // into the reconnected socket with a stale msgid or waits for a workflow
   // Respond that may never come. Expected behaviour: bridge emits a
   // `disconnect` event carrying the reason so consumers can clean up.
+  // The retry contract from CONTEXT.md §6.4 "Capability metadata and retry contract":
+  //
+  // - callWithOptions(method, params[], { idempotent: true }) retries ONCE on
+  //   ConnectionError mid-call, gated by Promise.race(reconnect, remaining budget).
+  // - { idempotent: false } (the default) never retries.
+  // - Never retry on TimeoutError — the MCU may still be executing.
+  // - The retry shares the original timeoutMs budget — no second full window.
+  describe('callWithOptions()', () => {
+    it('retries once on mid-call socket drop when idempotent', async () => {
+      // First attempt: send the request, then drop the socket so the call
+      // rejects with ConnectionError. Bridge auto-reconnects, then we retry.
+      const pending = bridge.callWithOptions('toggle_valve', [true], {
+        idempotent: true,
+        timeoutMs: 2000,
+      });
+
+      // Wait for the first request to land, then kill the socket.
+      await new Promise((r) => setTimeout(r, 30));
+      const firstReq = router.received.find(
+        (m) => m[0] === MSG_REQUEST && m[2] === 'toggle_valve',
+      ) as RpcRequest;
+      expect(firstReq).toBeDefined();
+      router.received.length = 0;
+      router.destroyClients();
+
+      // Wait for reconnect (baseDelayMs=50 in connectBridge) and the retry.
+      await new Promise((r) => setTimeout(r, 200));
+      const retryReq = router.received.find(
+        (m) => m[0] === MSG_REQUEST && m[2] === 'toggle_valve',
+      ) as RpcRequest;
+      expect(retryReq).toBeDefined();
+      expect(retryReq[1]).not.toBe(firstReq[1]); // fresh msgid
+
+      router.respond(retryReq[1], null, 'ok');
+      await expect(pending).resolves.toBe('ok');
+    });
+
+    it('does not retry on socket drop when not idempotent', async () => {
+      const pending = bridge.callWithOptions('pulse_relay', [], {
+        idempotent: false,
+        timeoutMs: 2000,
+      });
+
+      await new Promise((r) => setTimeout(r, 30));
+      router.received.length = 0;
+      router.destroyClients();
+
+      await expect(pending).rejects.toThrow(ConnectionError);
+
+      // Wait past the reconnect window and confirm no retry was attempted.
+      await new Promise((r) => setTimeout(r, 250));
+      const retryReq = router.received.find(
+        (m) => m[0] === MSG_REQUEST && m[2] === 'pulse_relay',
+      );
+      expect(retryReq).toBeUndefined();
+    });
+
+    it('does not retry on timeout, even when idempotent', async () => {
+      // Server never responds. Should reject with TimeoutError after timeoutMs,
+      // and never re-send the request even though idempotent is true.
+      const pending = bridge.callWithOptions('slow_read', [], {
+        idempotent: true,
+        timeoutMs: 80,
+      });
+
+      await expect(pending).rejects.toThrow(TimeoutError);
+
+      const all = router.received.filter(
+        (m) => m[0] === MSG_REQUEST && m[2] === 'slow_read',
+      );
+      expect(all).toHaveLength(1);
+    });
+
+    // Even before the original §6.4 contract, there's a foot-gun: if a call
+    // *starts* during the brief window between socket-drop and reconnect, the
+    // bridge previously wrote to a destroyed socket silently and the pending
+    // entry sat until the timer fired (TimeoutError). The retry path didn't
+    // help because there was no first-attempt ConnectionError to catch.
+    //
+    // Fix: attempt() checks `this.connected` and rejects fast with
+    // ConnectionError when disconnected, so:
+    // - non-idempotent fails fast instead of waiting for timeout, and
+    // - idempotent enters the retry path and recovers after reconnect.
+    //
+    // This makes the contract self-consistent: "idempotent calls survive
+    // socket disruption" rather than "...survive only mid-call disruption".
+    it('rejects fast with ConnectionError when call starts while disconnected (no retry)', async () => {
+      router.destroyClients();
+      // Wait long enough for the bridge to register the close (connected=false)
+      // but well short of the reconnect delay (baseDelayMs=50 in connectBridge).
+      await new Promise((r) => setTimeout(r, 20));
+
+      const start = Date.now();
+      await expect(
+        bridge.callWithOptions('something', [], { idempotent: false, timeoutMs: 2000 }),
+      ).rejects.toThrow(ConnectionError);
+      const elapsed = Date.now() - start;
+      // Should be near-instant, nowhere near the 2000ms budget.
+      expect(elapsed).toBeLessThan(100);
+    });
+
+    it('idempotent call started while disconnected retries after reconnect', async () => {
+      router.destroyClients();
+      await new Promise((r) => setTimeout(r, 20));
+
+      const pending = bridge.callWithOptions('echo', [], {
+        idempotent: true,
+        timeoutMs: 3000,
+      });
+
+      // Wait for transport reconnect (~50ms) + retry attempt to send the
+      // request, then respond from the mock.
+      await new Promise((r) => setTimeout(r, 200));
+      const req = router.received.find(
+        (m) => m[0] === MSG_REQUEST && m[2] === 'echo',
+      ) as RpcRequest;
+      expect(req).toBeDefined();
+      router.respond(req[1], null, 'retry-after-dead-window');
+
+      await expect(pending).resolves.toBe('retry-after-dead-window');
+    });
+
+    // Reality check: a single arduino-router restart causes multiple
+    // disconnect/reconnect cycles (the SSH tunnel recovers faster than the
+    // router stabilises). A "retry once" contract leaks ConnectionError on
+    // the second drop. The contract is "retry within the remaining timeoutMs
+    // budget" — keep retrying as long as the budget allows.
+    it('retries through cascading drops when idempotent', async () => {
+      const pending = bridge.callWithOptions('flapping', [], {
+        idempotent: true,
+        timeoutMs: 3000,
+      });
+
+      // Wait for the first attempt to land, then drop the connection.
+      await new Promise((r) => setTimeout(r, 30));
+      router.received.length = 0;
+      router.destroyClients();
+
+      // Wait for the bridge to reconnect and the retry attempt to land,
+      // then drop again before responding.
+      await new Promise((r) => setTimeout(r, 200));
+      const retry1 = router.received.find(
+        (m) => m[0] === MSG_REQUEST && m[2] === 'flapping',
+      ) as RpcRequest;
+      expect(retry1).toBeDefined();
+      router.received.length = 0;
+      router.destroyClients();
+
+      // Wait for the second reconnect + second retry, then respond.
+      await new Promise((r) => setTimeout(r, 200));
+      const retry2 = router.received.find(
+        (m) => m[0] === MSG_REQUEST && m[2] === 'flapping',
+      ) as RpcRequest;
+      expect(retry2).toBeDefined();
+      expect(retry2[1]).not.toBe(retry1[1]); // fresh msgid
+
+      router.respond(retry2[1], null, 'survived-cascading-drops');
+      await expect(pending).resolves.toBe('survived-cascading-drops');
+    });
+
+    it('respects the overall timeoutMs budget across retries', async () => {
+      // Idempotent call, but the bridge cannot reconnect before the budget runs
+      // out — the mock router is stopped entirely. The race between the
+      // reconnect event and the remaining budget must let the budget win and
+      // surface a TimeoutError, not hang or extend the window.
+      const pending = bridge.callWithOptions('read_temp', [], {
+        idempotent: true,
+        timeoutMs: 200,
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      // Stop the router so reconnect attempts keep failing.
+      await router.stop();
+
+      const start = Date.now();
+      await expect(pending).rejects.toThrow(TimeoutError);
+      const elapsed = Date.now() - start;
+      // Should be roughly within the original budget (200ms total from call
+      // start, ~170ms from this point). Allow generous slack for CI jitter,
+      // but it must be well under "two budgets" (400ms).
+      expect(elapsed).toBeLessThan(350);
+    });
+  });
+
   describe('socket close signalling', () => {
     it('emits a disconnect event when the socket drops', async () => {
       const events: Array<{ err?: Error }> = [];

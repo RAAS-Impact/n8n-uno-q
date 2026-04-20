@@ -48,6 +48,21 @@ export interface ConnectOptions {
 
 export type BridgeOptions = Required<ConnectOptions>;
 
+/**
+ * Per-call options for `callWithOptions`. See CONTEXT.md §6.4 for the full
+ * retry contract; the short version lives next to callWithOptions below.
+ */
+export interface CallOptions {
+  /** Overall budget for the call, including any retry. Default: 5000ms. */
+  timeoutMs?: number;
+  /**
+   * May this call be safely retried when the socket drops mid-call? Governs
+   * auto-retry on `ConnectionError`. Default: false (fail-closed). Never
+   * retried on `TimeoutError` regardless — the MCU may still be executing.
+   */
+  idempotent?: boolean;
+}
+
 /** An in-flight outbound call waiting for its response. */
 type PendingRequest = {
   resolve: (value: unknown) => void;
@@ -98,6 +113,15 @@ export class Bridge extends EventEmitter {
 
   private connected = false;
 
+  /**
+   * True once the first connect has completed. The transport.on('connect')
+   * handler uses this to distinguish the initial connect (no re-registration,
+   * no 'reconnect' event) from subsequent reconnects. Tracking this
+   * explicitly is more robust than peeking at msgid — a fail-fast attempt
+   * may not bump msgid, leaving a stale "this is the first connect" reading.
+   */
+  private hasConnectedOnce = false;
+
   private constructor(private readonly options: BridgeOptions) {
     super();
     this.transport = new Transport(options.socket, options.reconnect as ReconnectOptions);
@@ -130,12 +154,14 @@ export class Bridge extends EventEmitter {
 
       this.transport.on('connect', () => {
         this.connected = true;
-        // msgid > 0 means we've been connected before — this is a reconnection.
-        // Re-register all methods so the router knows we still handle them.
-        if (this.msgid > 0) {
-          debug('reconnect', 're-registering providers');
-          this.reRegister().then(() => this.emit('reconnect'));
+        // First connect → flip the flag and stop. Subsequent connects are
+        // reconnections; re-register everything and emit 'reconnect'.
+        if (!this.hasConnectedOnce) {
+          this.hasConnectedOnce = true;
+          return;
         }
+        debug('reconnect', 're-registering providers');
+        this.reRegister().then(() => this.emit('reconnect'));
       });
 
       // On socket close, reject every pending call — the responses will never
@@ -250,23 +276,13 @@ export class Bridge extends EventEmitter {
 
   /**
    * Call a remote method and wait for its response.
-   * Uses the default 5s timeout — use callWithTimeout() if you need a different one.
+   * Uses the default 5s timeout — use callWithTimeout() if you need a different
+   * one, or callWithOptions() for per-call retry behaviour.
    *
    * Example: `await bridge.call('set_led_state', true)`
    */
   async call(method: string, ...params: unknown[]): Promise<unknown> {
-    const id = this.nextMsgId();
-    debug('send', 'request', id, method);
-
-    return new Promise<unknown>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new TimeoutError(method, DEFAULT_TIMEOUT_MS));
-      }, DEFAULT_TIMEOUT_MS);
-
-      this.pending.set(id, { resolve, reject, timer });
-      this.transport.write(encodeRequest(id, method, params));
-    });
+    return this.callWithOptions(method, params, {});
   }
 
   /**
@@ -275,18 +291,88 @@ export class Bridge extends EventEmitter {
    * Example: `await bridge.callWithTimeout('slow_sensor_read', 10000)`
    */
   async callWithTimeout(method: string, timeout: number, ...params: unknown[]): Promise<unknown> {
-    const id = this.nextMsgId();
-    debug('send', 'request', id, method, `timeout=${timeout}`);
+    return this.callWithOptions(method, params, { timeoutMs: timeout });
+  }
 
-    return new Promise<unknown>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new TimeoutError(method, timeout));
-      }, timeout);
+  /**
+   * Call a remote method with explicit per-call options.
+   *
+   * Retry contract (CONTEXT.md §6.4):
+   * - On `ConnectionError` (mid-call OR at call start, when the bridge is in
+   *   a known-disconnected state) AND only if `idempotent: true`: race the
+   *   bridge's 'reconnect' event against the remaining `timeoutMs` budget.
+   *   If reconnect wins, retry — and keep retrying through subsequent
+   *   ConnectionErrors until the call resolves OR the budget runs out.
+   *   A single arduino-router restart causes multiple disconnect/reconnect
+   *   cycles in practice, so a single retry isn't enough.
+   * - Never retry on `TimeoutError` — the MCU may still be executing, and
+   *   a successful execution is indistinguishable from a hang at this layer.
+   * - Never retry non-idempotent calls regardless of error type.
+   * - All retries share the original `timeoutMs` budget; the budget is the
+   *   hard cap on total wall time spent in callWithOptions.
+   */
+  async callWithOptions(
+    method: string,
+    params: unknown[] = [],
+    opts: CallOptions = {},
+  ): Promise<unknown> {
+    const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const idempotent = opts.idempotent ?? false;
+    const deadline = Date.now() + timeoutMs;
 
-      this.pending.set(id, { resolve, reject, timer });
-      this.transport.write(encodeRequest(id, method, params));
-    });
+    const attempt = (): Promise<unknown> => {
+      // Fail fast if the bridge is in a known-disconnected state. Otherwise
+      // we'd write to a destroyed socket (silently dropping the request) and
+      // wait for the timer to fire — denying the retry path a ConnectionError
+      // to react to.
+      if (!this.connected) {
+        return Promise.reject(new ConnectionError('Not connected'));
+      }
+      const remaining = Math.max(0, deadline - Date.now());
+      const id = this.nextMsgId();
+      debug('send', 'request', id, method, `budget=${remaining}`);
+      return new Promise<unknown>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          this.pending.delete(id);
+          reject(new TimeoutError(method, timeoutMs));
+        }, remaining);
+        this.pending.set(id, { resolve, reject, timer });
+        this.transport.write(encodeRequest(id, method, params));
+      });
+    };
+
+    const waitForReconnect = (remaining: number): Promise<boolean> =>
+      new Promise<boolean>((resolve) => {
+        const onReconnect = () => {
+          clearTimeout(timer);
+          resolve(true);
+        };
+        const timer = setTimeout(() => {
+          this.off('reconnect', onReconnect);
+          resolve(false);
+        }, remaining);
+        this.once('reconnect', onReconnect);
+      });
+
+    // Loop until the call resolves, the budget runs out, or a non-retryable
+    // error surfaces. Each iteration either returns the response or waits for
+    // the next 'reconnect' event before trying again.
+    for (;;) {
+      try {
+        return await attempt();
+      } catch (err) {
+        if (!(err instanceof ConnectionError) || !idempotent) throw err;
+
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) throw new TimeoutError(method, timeoutMs);
+
+        const reconnected = await waitForReconnect(remaining);
+        if (!reconnected) throw new TimeoutError(method, timeoutMs);
+        debug('send', 'retrying', method, 'after reconnect');
+        // Loop and try again. We do NOT cap retry count — the budget is the
+        // cap, and each iteration awaits an actual reconnect event (no spin).
+      }
+    }
   }
 
   /**

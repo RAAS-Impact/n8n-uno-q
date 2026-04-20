@@ -145,6 +145,26 @@ export class UnoQTool implements INodeType {
           'Parameters as a JSON array, e.g. [true, 42, {"foo": "bar"}]. Passed positionally to the MCU method.',
       },
       {
+        // Advisory signal for humans and for the LLM-facing description prose.
+        // Not read at runtime; exposed to expressions as $parameter.safeReadOnly
+        // so users who want a computed bracket tag in the Description can
+        // compose it themselves.
+        displayName: 'Safe (Read-Only)',
+        name: 'safeReadOnly',
+        type: 'boolean',
+        default: false,
+        description:
+          'Whether this method only reads state without changing anything on the MCU. Advisory: used for human-in-the-loop guidance and for composing your own LLM-facing description. Does not affect retry behaviour.',
+      },
+      {
+        displayName: 'Idempotent',
+        name: 'idempotent',
+        type: 'boolean',
+        default: false,
+        description:
+          'Whether calling this method multiple times with the same parameters leaves the MCU in the same state. When on, the bridge auto-retries once if the socket drops mid-call (within the remaining timeout budget). Leave off for actuators whose effect compounds (relative moves, pulses, counters).',
+      },
+      {
         displayName: 'Options',
         name: 'options',
         type: 'collection',
@@ -189,11 +209,15 @@ export class UnoQTool implements INodeType {
         const options = this.getNodeParameter('options', i, {}) as ToolOptions;
         const timeout = options.timeout ?? DEFAULT_TIMEOUT_MS;
         const socketPath = options.socketPath || DEFAULT_SOCKET;
+        const idempotent = this.getNodeParameter('idempotent', i, false) as boolean;
 
         const params = buildParams(this, mode, i);
 
         const bridge = await manager.getBridge(socketPath);
-        const result = await bridge.callWithTimeout(method, timeout, ...params);
+        const result = await bridge.callWithOptions(method, params, {
+          timeoutMs: timeout,
+          idempotent,
+        });
 
         returnData.push({
           json: { method, params, result: result ?? null },

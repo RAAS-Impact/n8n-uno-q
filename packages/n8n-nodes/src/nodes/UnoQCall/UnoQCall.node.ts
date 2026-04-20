@@ -18,6 +18,7 @@ interface FieldParameter {
 interface CallOptions {
   timeout?: number;
   socketPath?: string;
+  idempotent?: boolean;
 }
 
 const DEFAULT_SOCKET = '/var/run/arduino-router.sock';
@@ -129,6 +130,14 @@ export class UnoQCall implements INodeType {
             description:
               'Path to the arduino-router Unix socket. Change only for non-standard deployments.',
           },
+          {
+            displayName: 'Idempotent',
+            name: 'idempotent',
+            type: 'boolean',
+            default: false,
+            description:
+              'Whether calling this method multiple times with the same parameters leaves the MCU in the same state. When on, the bridge auto-retries once if the socket drops mid-call (within the remaining timeout budget). Leave off for actuators whose effect compounds (relative moves, pulses, counters).',
+          },
         ],
       },
     ],
@@ -152,11 +161,15 @@ export class UnoQCall implements INodeType {
         const options = this.getNodeParameter('options', i, {}) as CallOptions;
         const timeout = options.timeout ?? DEFAULT_TIMEOUT_MS;
         const socketPath = options.socketPath || DEFAULT_SOCKET;
+        const idempotent = options.idempotent ?? false;
 
         const params = buildParams(this, mode, i);
 
         const bridge = await manager.getBridge(socketPath);
-        const result = await bridge.callWithTimeout(method, timeout, ...params);
+        const result = await bridge.callWithOptions(method, params, {
+          timeoutMs: timeout,
+          idempotent,
+        });
 
         returnData.push({
           json: { method, params, result: result ?? null },

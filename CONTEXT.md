@@ -311,10 +311,12 @@ The bottom-left quadrant (unsafe + idempotent, the "set X to absolute Y" pattern
 
 **Bridge-level retry contract** (implemented in [packages/bridge/src/bridge.ts](packages/bridge/src/bridge.ts) via `callWithOptions`):
 
-- On `ConnectionError` during an in-flight call, *and only if* `{idempotent: true}` was passed: `Promise.race` the bridge's `'reconnect'` event against the remaining `timeoutMs` budget. If reconnect wins, retry once. If timeout wins, reject with `TimeoutError`.
-- Never retry on timeout — the MCU may still be executing, indistinguishable from success from our vantage point.
+- On `ConnectionError` (mid-call OR when starting a call against a known-disconnected bridge), *and only if* `{idempotent: true}` was passed: `Promise.race` the bridge's `'reconnect'` event against the remaining `timeoutMs` budget. If reconnect wins, retry — and keep retrying through subsequent ConnectionErrors until the call resolves or the budget runs out. A single `arduino-router` restart causes multiple drop/reconnect cycles in practice (the SSH/socket layer reconnects faster than the router fully stabilises), so a single retry leaves residual ConnectionErrors leaking to the caller.
+- Each iteration awaits an actual `'reconnect'` event before retrying — no spinning, no fixed sleep. The retry loop terminates the moment the budget is exhausted.
+- Never retry on `TimeoutError` — the MCU may still be executing, indistinguishable from success from our vantage point.
 - Never retry non-idempotent calls regardless of error type.
-- Retry respects the caller's overall `timeoutMs` — there is no second full window, only the remaining budget.
+- All retries share the original `timeoutMs` budget. The budget is the hard cap on total wall time spent in `callWithOptions`; there is no per-attempt window.
+- Calls that *start* during a known-disconnected window also fast-fail with `ConnectionError` rather than writing to a destroyed socket and waiting for the timer (which would deny the retry path a `ConnectionError` to react to). This makes "idempotent calls survive socket disruption" cover *all* disruption, not only mid-call.
 
 **Why LLM-visible safety signaling is left to the user, not auto-composed:**
 

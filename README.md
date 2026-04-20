@@ -7,6 +7,8 @@ The repo ships two npm packages:
 - **[`@raasimpact/arduino-uno-q-bridge`](packages/bridge/)** — a pure Node.js MessagePack-RPC client for `arduino-router` (the Go service that runs on the Q). Zero external dependencies except `@msgpack/msgpack`. Useful on its own for anyone writing Node.js code on a UNO Q — Express, Fastify, Bun, raw scripts.
 - **[`n8n-nodes-uno-q`](packages/n8n-nodes/)** — an n8n community package that depends on the bridge and exposes four nodes: *Arduino UNO Q Call* (action), *Arduino UNO Q Trigger* (MCU → workflow events), *Arduino UNO Q Respond* (companion to Trigger's deferred-response mode), and *Arduino UNO Q Method* (callable by n8n's AI Agent, so an LLM can decide when to read a sensor or fire an actuator as part of reasoning).
 
+For AI-agent workflows touching actuators, read the bridge's [Retry and idempotency](packages/bridge/README.md#retry-and-idempotency) section before wiring up a Method node — the two per-method safety flags (`safeReadOnly`, `idempotent`) decide whether the bridge auto-retries a mid-call socket drop, and getting them right keeps relays from firing twice.
+
 ---
 
 ## Production install — on the UNO Q

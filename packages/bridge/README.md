@@ -63,6 +63,10 @@ Send an RPC request and wait for the response (5s default timeout). Rejects with
 
 Same as `call()` with an explicit timeout.
 
+### `bridge.callWithOptions(method, params, { timeoutMs?, idempotent? })`
+
+Like `call()` but with per-call retry semantics. See [Retry and idempotency](#retry-and-idempotency) below.
+
 ### `bridge.notify(method, ...params)`
 
 Fire-and-forget. No response, no error propagation.
@@ -99,6 +103,67 @@ All errors extend `BridgeError` and carry a `code` string for programmatic handl
 | `TimeoutError` | `TIMEOUT` | No response within the timeout window |
 | `ConnectionError` | `CONNECTION` | Socket closed or unreachable |
 | `MethodNotAvailableError` | `METHOD_NOT_AVAILABLE` | Router has no handler for the method |
+
+## Retry and idempotency
+
+When the router socket drops mid-call, the MCU may have already executed a write but the response never made it back. A naïve retry fires the actuator twice. `callWithOptions` solves this with a single per-call boolean — `idempotent` — that gates auto-retry on `ConnectionError`.
+
+```ts
+// Safe to replay: setting an absolute state.
+await bridge.callWithOptions('set_valve', [0], { idempotent: true });
+
+// Unsafe to replay: relative move. Default (idempotent: false) = never retry.
+await bridge.callWithOptions('move_stepper', [+100]);
+```
+
+### Two orthogonal properties
+
+`safeReadOnly` (does this method change state?) and `idempotent` (can it be replayed?) are independent. All four quadrants exist:
+
+|                         | **idempotent**                                         | **not idempotent**                      |
+| ----------------------- | ------------------------------------------------------ | --------------------------------------- |
+| **safe (read-only)**    | `read_temperature` — retry freely                      | rare consumable reads (e.g. `pop_event`) |
+| **unsafe (writes)**     | `set_valve(closed)`, `set_led_brightness(50)` — retry OK, still wants human-in-the-loop | `pulse_relay`, `move_stepper(+100)` — never retry |
+
+The bottom-left (unsafe + idempotent, the "set X to absolute Y" pattern) is the common IoT case. A single flag would either forbid retrying `set_valve(closed)` or permit retrying `pulse_relay` — both wrong.
+
+### Retry contract
+
+- On `ConnectionError` (mid-call OR when starting a call while the bridge is known-disconnected) **and only if** `idempotent: true`: the call races the bridge's `reconnect` event against the remaining `timeoutMs` budget. Reconnect wins → retry. If the retry also hits a `ConnectionError`, race again — keep retrying as long as the budget allows. (A single router restart usually produces multiple drop/reconnect cycles, so one retry is not enough in practice.)
+- Each iteration awaits an actual `reconnect` event — no spinning, no fixed sleep.
+- Never retry on `TimeoutError` — the MCU may still be executing, indistinguishable from a hang at this layer.
+- Never retry non-idempotent calls regardless of error type.
+- The original `timeoutMs` is the hard cap on total wall time. Once it runs out, the call rejects with `TimeoutError` regardless of how many retries were attempted.
+
+`safeReadOnly` is **not** read by the bridge. It is a user-facing signal for the LLM-layer tool description (when this library is used via `n8n-nodes-uno-q`) and for human reviewers choosing which tools need human-in-the-loop gating. Keep the two flags separate so your signaling to the LLM stays under your control.
+
+### Tool description templates
+
+If you are exposing a method to an LLM agent, the safety signaling belongs in the tool description prose — not in magic bracket tags the bridge invents for you. Pick a style and use it consistently; different models parse different conventions best.
+
+**Bracket tag** — compact, machine-friendly:
+
+```
+[SAFE, IDEMPOTENT] Reads the onboard temperature in °C.
+[UNSAFE, IDEMPOTENT] Sets the valve to the given percentage open (0–100).
+[UNSAFE, NON-IDEMPOTENT] Pulses the relay for one tick — do not call twice.
+```
+
+**Prose** — for models that handle natural-language cues better than tags:
+
+```
+Reads the onboard temperature. Safe to call any time; no side effects.
+Sets the valve to the given percentage open. Retryable — repeating the call with the same value leaves the valve in the same state.
+Pulses the relay once. Each call advances state — never call this twice for the same intended action.
+```
+
+**Minimal** — trust the LLM and the HITL gate, keep descriptions terse:
+
+```
+Read onboard temperature.
+Set valve open percentage (0–100).
+Pulse the relay once.
+```
 
 ## Running inside Docker
 
