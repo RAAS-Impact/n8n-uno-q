@@ -138,7 +138,14 @@ export class Bridge extends EventEmitter {
         }
       });
 
-      // On socket close, reject every pending call — the responses will never arrive.
+      // On socket close, reject every pending call — the responses will never
+      // arrive. Also clear the in-flight provide handler tracking (those IIFEs
+      // keep running in the background, but their eventual RESPONSE bytes go
+      // nowhere — the original MCU msgid is unknown to any socket we reconnect
+      // to). Finally, emit a `disconnect` event so application-layer consumers
+      // (e.g. n8n's UnoQTrigger holding deferred PendingRequests entries) have
+      // a hook to clean up their own state instead of waiting for a RESPONSE
+      // that will never reach the original caller.
       this.transport.on('close', () => {
         this.connected = false;
         for (const [id, req] of this.pending) {
@@ -146,6 +153,8 @@ export class Bridge extends EventEmitter {
           req.reject(new ConnectionError('Socket closed'));
           this.pending.delete(id);
         }
+        this.activeHandlers.clear();
+        this.emit('disconnect');
       });
 
       this.transport.on('error', (err: Error) => {
