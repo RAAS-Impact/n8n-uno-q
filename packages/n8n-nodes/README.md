@@ -51,7 +51,7 @@ The **Idempotent** checkbox (default `false`, fail-closed) answers one question:
 - **Yes** → tick the box. The bridge auto-retries on mid-call `ConnectionError` within the remaining timeout budget. Covers absolute writes (`set_valve(closed)`), pure reads, anything whose end-state is deterministic.
 - **No** → leave it off. Relative moves, pulses, counters — a replay would double the effect. The `ConnectionError` surfaces and a human (or the LLM, per your description) decides what to do.
 
-The *Arduino UNO Q Call* node (non-AI) has the same `Idempotent` option under *Options*. For details of the bridge-level retry contract (how many retries, budget handling, what never retries), see the bridge README's [Retry and idempotency](https://github.com/raas-impact/n8n-uno-q/blob/main/packages/bridge/README.md#retry-and-idempotency) section.
+The *Arduino UNO Q Call* node (non-AI) has the same top-level **Idempotent** checkbox. For details of the bridge-level retry contract (how many retries, budget handling, what never retries), see the bridge README's [Retry and idempotency](https://github.com/raas-impact/n8n-uno-q/blob/main/packages/bridge/README.md#retry-and-idempotency) section.
 
 ## Method guard
 

@@ -18,7 +18,6 @@ interface FieldParameter {
 interface CallOptions {
   timeout?: number;
   socketPath?: string;
-  idempotent?: boolean;
 }
 
 const DEFAULT_SOCKET = '/var/run/arduino-router.sock';
@@ -109,6 +108,14 @@ export class UnoQCall implements INodeType {
           'Parameters as a JSON array, e.g. [true, 42, {"foo": "bar"}]. The array is passed positionally to the MCU method.',
       },
       {
+        displayName: 'Idempotent',
+        name: 'idempotent',
+        type: 'boolean',
+        default: false,
+        description:
+          'Whether calling this method multiple times with the same parameters leaves the MCU in the same state. When on, the bridge auto-retries if the socket drops mid-call (within the remaining timeout budget). Leave off for actuators whose effect compounds (relative moves, pulses, counters). An absolute write like set_valve(closed) is idempotent; a relative move like move_stepper(+100) is not.',
+      },
+      {
         displayName: 'Options',
         name: 'options',
         type: 'collection',
@@ -129,14 +136,6 @@ export class UnoQCall implements INodeType {
             default: DEFAULT_SOCKET,
             description:
               'Path to the arduino-router Unix socket. Change only for non-standard deployments.',
-          },
-          {
-            displayName: 'Idempotent',
-            name: 'idempotent',
-            type: 'boolean',
-            default: false,
-            description:
-              'Whether calling this method multiple times with the same parameters leaves the MCU in the same state. When on, the bridge auto-retries once if the socket drops mid-call (within the remaining timeout budget). Leave off for actuators whose effect compounds (relative moves, pulses, counters).',
           },
         ],
       },
@@ -161,7 +160,7 @@ export class UnoQCall implements INodeType {
         const options = this.getNodeParameter('options', i, {}) as CallOptions;
         const timeout = options.timeout ?? DEFAULT_TIMEOUT_MS;
         const socketPath = options.socketPath || DEFAULT_SOCKET;
-        const idempotent = options.idempotent ?? false;
+        const idempotent = this.getNodeParameter('idempotent', i, false) as boolean;
 
         const params = buildParams(this, mode, i);
 
