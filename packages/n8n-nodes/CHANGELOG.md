@@ -4,6 +4,29 @@ All notable changes to `n8n-nodes-uno-q` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] — 2026-04-20
+
+### Added
+
+- **UnoQTool — Rate Limit** collection (`Max Calls` + `Per` of minute / hour /
+  day). Caps how often the AI Agent may invoke the tool; excess calls
+  short-circuit with a structured rejection `{ refused: true, error: "Refused:
+  rate limit of N per <window> exceeded. Retry in ~Xs." }` that the LLM reads
+  and can react to. The check runs before the Method Guard, and the call is
+  recorded only after both gates pass — so guard-rejected calls do not consume
+  rate-limit budget. Counters are a sliding window kept in-memory per n8n
+  process (reset on container restart, not shared across queue-mode workers,
+  which remains unsupported for the same reason the bridge singleton is).
+- **`budget` variable in Method Guard scope** — a read-only view of the call
+  history for traffic-aware policies. `budget.used(window)` returns prior
+  successful calls in the last `'minute' | 'hour' | 'day'` and works whether
+  or not a Rate Limit is configured, so guards can implement soft caps
+  without committing to hard enforcement. `budget.remaining` and
+  `budget.resetsInMs` expose cap-aware state when the Rate Limit field is set
+  (number / number) and are `null` otherwise — enabling patterns like priority
+  reservation ("refuse low-priority params when `remaining < 3`"). Exposed via
+  `new Function('method', 'params', 'budget', <guard body>)`.
+
 ## [0.2.0] — 2026-04-20
 
 ### Added
