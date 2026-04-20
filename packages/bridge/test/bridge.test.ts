@@ -321,4 +321,53 @@ describe('Bridge', () => {
       expect(reReg).toBeDefined();
     });
   });
+
+  // Tests for a hygiene gap identified by code review: when the socket drops
+  // while a provide handler is in-flight, the bridge currently has no way to
+  // signal the application layer. Consumers (e.g. n8n's UnoQTrigger, which
+  // holds deferred request state in PendingRequests) have no hook to reject
+  // their orphaned entries, so the handler's eventual RESPONSE either vanishes
+  // into the reconnected socket with a stale msgid or waits for a workflow
+  // Respond that may never come. Expected behaviour: bridge emits a
+  // `disconnect` event carrying the reason so consumers can clean up.
+  describe('socket close signalling', () => {
+    it('emits a disconnect event when the socket drops', async () => {
+      const events: Array<{ err?: Error }> = [];
+      bridge.on('disconnect', (err?: Error) => {
+        events.push({ err });
+      });
+
+      router.destroyClients();
+      await new Promise((r) => setTimeout(r, 100));
+
+      expect(events.length).toBeGreaterThan(0);
+    });
+
+    it('does not leave orphaned provide handlers in activeHandlers after a mid-call drop', async () => {
+      let resolveHandler: (v: unknown) => void = () => {};
+      await bridge.provide('long_running', () => {
+        return new Promise((resolve) => {
+          resolveHandler = resolve;
+        });
+      });
+
+      router.received.length = 0;
+      router.sendRequest(99, 'long_running', []);
+      await new Promise((r) => setTimeout(r, 50));
+      expect(bridge.activeHandlerCount).toBe(1);
+
+      // Socket drops mid-handler. The handler's eventual RESPONSE has nowhere
+      // to go — the original MCU msgid is unknown to whatever socket comes
+      // back. The in-flight task should be cleaned up so consumers can notice
+      // and abort their own deferred state.
+      router.destroyClients();
+      await new Promise((r) => setTimeout(r, 150));
+
+      expect(bridge.activeHandlerCount).toBe(0);
+
+      // Let any leftover Promise settle so afterEach can close cleanly
+      resolveHandler('late-response');
+      await new Promise((r) => setTimeout(r, 30));
+    });
+  });
 });

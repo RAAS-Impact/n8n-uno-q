@@ -1,0 +1,155 @@
+/**
+ * BridgeManager tests — covers the hygiene gap identified by code review.
+ *
+ * When a trigger deactivates, BridgeManager.release() sets `this.bridge = null`
+ * synchronously but schedules the actual socket close as a fire-and-forget
+ * background task (waitForActiveHandlers up to 60s, then close). If an
+ * acquire() fires inside that window it opens a *fresh* connection while the
+ * old one is still alive — a real arduino-router would reject $/register
+ * calls from the new connection for methods still owned by the old one.
+ *
+ * This test reproduces the race by observing active connections on a local
+ * mock router that mimics the real router's transport shape (no registration
+ * enforcement needed — the observable symptom is two open connections).
+ */
+import { describe, it, expect } from 'vitest';
+import net from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
+import fs from 'node:fs';
+import crypto from 'node:crypto';
+import { BridgeManager } from '../src/BridgeManager.js';
+
+/**
+ * Minimal msgpack-rpc-ish mock router. We only need enough to let the bridge
+ * connect and auto-ack $/register calls so the test scenario can drive state.
+ * Deliberately lean — factored copies of packages/bridge/test's MockRouter can
+ * live in a shared helpers package later.
+ */
+class MockRouter {
+  readonly socketPath: string;
+  private server: net.Server;
+  clients: net.Socket[] = [];
+
+  constructor() {
+    this.socketPath = path.join(os.tmpdir(), `mgr-test-${crypto.randomUUID()}.sock`);
+    this.server = net.createServer((socket) => this.onClient(socket));
+  }
+
+  async start(): Promise<void> {
+    return new Promise((resolve) => {
+      this.server.listen(this.socketPath, () => resolve());
+    });
+  }
+
+  private onClient(socket: net.Socket): void {
+    this.clients.push(socket);
+
+    // Auto-ack every $/register by scanning incoming bytes for the string
+    // "$/register" and writing back a success response for each. This is
+    // crude but sufficient: the bridge only needs SOME response to unblock
+    // its own provide() Promises, and we don't assert on call semantics here.
+    socket.on('data', (chunk: Buffer) => {
+      if (chunk.includes(Buffer.from('$/register'))) {
+        // Respond success: [1, msgid, null, true] — msgid is the second byte
+        // after the 0x94 array-of-4 marker in the incoming REQUEST. We don't
+        // decode properly; the bridge tolerates ack noise as long as msgids
+        // line up, and our tests don't depend on the return value.
+        // Cheap hack: respond to msgid = chunk[2] (close enough for the shape
+        // msgpack typically produces for small ints).
+        const msgid = chunk[2];
+        const response = Buffer.from([0x94, 0x01, msgid, 0xc0, 0xc3]); // [1, msgid, null, true]
+        socket.write(response);
+      }
+    });
+
+    socket.on('close', () => {
+      this.clients = this.clients.filter((c) => c !== socket);
+    });
+
+    socket.on('error', () => {
+      /* ignore */
+    });
+  }
+
+  /** Send a REQUEST to the most recent client (triggers a provide handler). */
+  sendRequest(msgid: number, method: string): void {
+    const socket = this.clients[this.clients.length - 1];
+    if (!socket) return;
+    // [0, msgid, method, []] — minimal hand-crafted msgpack for this shape
+    const methodBytes = Buffer.from(method, 'utf-8');
+    const msg = Buffer.concat([
+      Buffer.from([0x94, 0x00, msgid]), // array(4), 0, msgid (small int)
+      Buffer.from([0xa0 | methodBytes.length]), // fixstr marker
+      methodBytes,
+      Buffer.from([0x90]), // empty array
+    ]);
+    socket.write(msg);
+  }
+
+  async stop(): Promise<void> {
+    for (const c of this.clients) c.destroy();
+    return new Promise((resolve) => {
+      this.server.close(() => {
+        try {
+          fs.unlinkSync(this.socketPath);
+        } catch {
+          /* already gone */
+        }
+        resolve();
+      });
+    });
+  }
+}
+
+describe('BridgeManager close race', () => {
+  it('does not leave the previous bridge connected to the router after acquire+release churn', async () => {
+    const router = new MockRouter();
+    await router.start();
+
+    try {
+      const manager = new BridgeManager();
+
+      const bridgeA = await manager.acquire(router.socketPath);
+      bridgeA.on('error', () => {}); // suppress unhandled-error noise
+
+      // Install a provide handler that never resolves. This keeps
+      // activeHandlers populated so waitForActiveHandlers(60_000) inside
+      // release() cannot return immediately — exposing the race window.
+      let resolveStuck: (v: unknown) => void = () => {};
+      await bridgeA.provide('stuck', () => {
+        return new Promise((resolve) => {
+          resolveStuck = resolve;
+        });
+      });
+
+      router.sendRequest(5, 'stuck');
+      await new Promise((r) => setTimeout(r, 50));
+      expect(bridgeA.activeHandlerCount).toBe(1);
+
+      // Release starts a background close that will stall on the pending
+      // handler for up to 60s. The old socket stays connected during this
+      // time.
+      await manager.release();
+
+      // Immediately acquire a new bridge — this is the window the race lives in.
+      const bridgeB = await manager.acquire(router.socketPath);
+      bridgeB.on('error', () => {});
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Expected after fix: acquire() should have waited for the previous
+      // close to complete, leaving only one live connection. Currently it
+      // doesn't, so the mock sees two clients (A still hanging on the stuck
+      // handler, B freshly opened).
+      expect(router.clients.length).toBe(1);
+
+      // Cleanup: unblock A's stuck handler so it can close, then release B
+      resolveStuck('done');
+      await new Promise((r) => setTimeout(r, 100));
+      await manager.release();
+      await new Promise((r) => setTimeout(r, 100));
+    } finally {
+      await router.stop();
+    }
+  }, 10_000);
+});
