@@ -1,9 +1,10 @@
 {
   "name": "n8n-nodes-uno-q",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "n8n community nodes for the Arduino UNO Q — read sensors, drive GPIO, react to MCU events, and expose MCU methods as AI Agent tools.",
   "files": [
-    "dist"
+    "dist",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "build": "tsc --noEmit && node scripts/build.mjs && node scripts/copy-assets.mjs",
@@ -20,7 +21,7 @@
     ]
   },
   "dependencies": {
-    "@raasimpact/arduino-uno-q-bridge": "^0.1.0"
+    "@raasimpact/arduino-uno-q-bridge": "^0.1.1"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
