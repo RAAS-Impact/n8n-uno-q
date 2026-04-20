@@ -4,6 +4,26 @@ All notable changes to `@raasimpact/arduino-uno-q-bridge` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] — 2026-04-20
+
+### Added
+
+- `Bridge.callWithOptions(method, params[], opts)` — new public entry point
+  taking an `opts` bag (`{ timeoutMs, idempotent }`). When `idempotent: true`,
+  an in-flight or about-to-start call that hits `ConnectionError` races the
+  bridge's `reconnect` event against the remaining `timeoutMs` budget and
+  retries — repeatedly, through cascading drop/reconnect cycles, until the
+  call resolves or the budget runs out. Never retries on `TimeoutError` or
+  for non-idempotent calls. Calls that *start* against a known-disconnected
+  bridge fast-fail with `ConnectionError` so the retry path has something to
+  react to rather than waiting out the full timeout on a destroyed socket.
+
+### Changed
+
+- `call(method, params[])` and `callWithTimeout(method, params[], timeoutMs)`
+  are now thin wrappers over `callWithOptions` with `idempotent: false`.
+  Behavior preserved for existing callers.
+
 ## [0.1.1] — 2026-04-20
 
 ### Added
