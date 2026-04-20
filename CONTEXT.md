@@ -291,23 +291,17 @@ Since descriptions must be typed by the user into n8n, encourage MCU developers 
 Bridge.provide("set_led_state", set_led_state);
 ```
 
-**Capability metadata and retry contract (v2 addition)**
+**Capability metadata, retry contract, and method guards (v2 addition)**
 
-Extends the Method node design with per-method safety metadata for agent-driven hardware scenarios. Motivating problem: when the router socket drops mid-invocation, the MCU may have already executed a write but the RESPONSE never made it back. A naïve retry — by the bridge OR by the LLM reacting to a tool error — fires the actuator twice.
+Extends the Method node design for agent-driven hardware scenarios. Two motivating problems:
 
-**Two boolean fields per Method node**, defaults both `false` (fail-closed by design):
+1. **Mid-call socket drops.** When `arduino-router` blips, the MCU may have already executed a write but the RESPONSE never made it back. A naïve retry — by the bridge OR by the LLM reacting to a tool error — fires the actuator twice.
+2. **Invocations that need per-call vetting.** Even a well-described tool can be invoked with a destructive parameter (`set_motor_speed(9999)`, `delete_record("*")`) or at an inappropriate moment (outside business hours, during a maintenance window). Static per-method "safe/unsafe" metadata cannot distinguish safe from unsafe *invocations*; the decision depends on the actual arguments and on runtime conditions the MCU can't see.
 
-- **`safeReadOnly`** — "does this method only read state, without changing anything on the MCU?" Advisory signal to the user (HITL config, description prose). The bridge does NOT read this flag.
-- **`idempotent`** — "can this method be called multiple times with the same end result?" Passed to `bridge.callWithOptions(..., { idempotent })`. Gates auto-retry on mid-call `ConnectionError`.
+**Two runtime mechanisms, one per problem:**
 
-**The two flags are orthogonal because all four quadrants are real:**
-
-| | idempotent | not idempotent |
-|---|---|---|
-| **safe (read-only)** | `read_temperature` — retry freely, no gate | rare consumable reads (e.g. `pop_event`) |
-| **unsafe (writes)** | `set_valve(closed)`, `set_led_brightness(50)` — retry is safe because end-state is deterministic, still wants HITL | `pulse_relay`, `move_stepper(+100)` — never retry, must HITL |
-
-The bottom-left quadrant (unsafe + idempotent, the "set X to absolute Y" pattern) is the common IoT case. Collapsing to a single flag would either forbid a safe retry for `set_valve(closed)` or permit an unsafe retry for `pulse_relay`.
+- **`idempotent`** — boolean, per Method node, default `false`. Passed to `bridge.callWithOptions(..., { idempotent })`. Gates auto-retry on `ConnectionError`. Answers: *"if the socket drops, is it safe for the bridge to replay this?"*
+- **`methodGuard`** — optional JavaScript function body, per Method node, empty by default. Evaluated at invocation time with `method` (string) and `params` (array) in scope. Typical uses: argument validation, time-of-day gating, external-state checks. Return `true`/`undefined` to allow, `false` for a generic rejection, a string to reject with that message, or throw. When wired to an AI Agent, the rejection message surfaces as tool output so the LLM can self-correct.
 
 **Bridge-level retry contract** (implemented in [packages/bridge/src/bridge.ts](packages/bridge/src/bridge.ts) via `callWithOptions`):
 
@@ -316,44 +310,50 @@ The bottom-left quadrant (unsafe + idempotent, the "set X to absolute Y" pattern
 - Never retry on `TimeoutError` — the MCU may still be executing, indistinguishable from success from our vantage point.
 - Never retry non-idempotent calls regardless of error type.
 - All retries share the original `timeoutMs` budget. The budget is the hard cap on total wall time spent in `callWithOptions`; there is no per-attempt window.
-- Calls that *start* during a known-disconnected window also fast-fail with `ConnectionError` rather than writing to a destroyed socket and waiting for the timer (which would deny the retry path a `ConnectionError` to react to). This makes "idempotent calls survive socket disruption" cover *all* disruption, not only mid-call.
+- Calls that *start* during a known-disconnected window also fast-fail with `ConnectionError` rather than writing to a destroyed socket and waiting for the timer. This makes "idempotent calls survive socket disruption" cover *all* disruption, not only mid-call.
 
-**Why LLM-visible safety signaling is left to the user, not auto-composed:**
+**Method guard contract** (implemented in [packages/n8n-nodes/src/nodes/UnoQTool/UnoQTool.node.ts](packages/n8n-nodes/src/nodes/UnoQTool/UnoQTool.node.ts) inside `execute()`):
 
-An earlier design auto-prepended a `[SAFE, IDEMPOTENT]` tag to the tool description. Rejected on three grounds:
-1. Different LLMs parse bracket syntax differently; no single format is universal.
-2. The convention assumes the LLM understands the tag, which is an empirical question we cannot answer once and for all.
-3. It precludes advanced users who want to compose their own prose, JSON-like attributes, or emoji-prefixed styles tuned to their specific model.
+- Guard body is wrapped as `new Function('method', 'params', <body>)` — no sandbox, same trust model as the n8n Code node.
+- Runs after params are built and coerced, before `bridge.callWithOptions`.
+- Return `true` / `undefined` / `null` → allow. Return `false` → reject with a generic message. Return a string → reject with that string. Throw → genuine workflow error, prefixed `Method guard threw:` (reserved for guard bugs — JS syntax errors, unexpected return types).
+- Rejections are emitted as a **structured tool output** `{ method, params, refused: true, error: "<message>" }`, not thrown. n8n's `usableAsTool` wrapper does not reliably surface thrown `NodeOperationError`s to the LLM's observation stream (they fall onto the workflow-error bus); returning as data keeps the rejection reachable to the agent so it can self-correct. Non-AI workflows can branch on `json.refused`.
+- Empty guard body skips evaluation entirely. Default is empty.
+- The UI uses n8n's `jsEditor` widget (`typeOptions.editor: 'jsEditor'`) — syntax-highlighted JavaScript without the `$json`/`$input` autocompletes of `codeNodeEditor`, since those globals aren't provided.
 
-Instead:
+**Why a guard replaces the earlier `safeReadOnly` flag:**
 
-- `toolDescription` remains a single user-editable field. No hidden composition, no magic preview, no auto-prepending.
-- The two booleans are addressable in n8n's expression system as `$parameter.safeReadOnly` / `$parameter.idempotent`, so users who *want* a computed tag can write their own expression — e.g. `={{ "[" + ($parameter.safeReadOnly ? "SAFE" : "UNSAFE") + "] " + "Sets the valve position." }}`.
-- The bridge README ships copy-paste templates (bracket-tag, prose, minimal) as guidance, not enforcement.
+- **Enforceable**, not advisory. A boolean saying "this tool is safe" cannot prevent the LLM from passing a dangerous *value* to the tool. A guard inspects the actual parameters and refuses at the gate.
+- **Per-invocation**, not per-method. `set_motor_speed(5)` and `set_motor_speed(9999)` are safe and unsafe respectively; a per-method flag can't distinguish.
+- **Closes the LLM-retry feedback loop productively.** A rejection message like `"speed must be ≤ 100"` teaches the model what to correct, whereas a generic tool error invites blind retry with the same bad value.
 
-This separates **bridge-layer safety** (automatic, invisible, driven by `idempotent` only) from **LLM-layer signaling** (fully user-controlled prose in `toolDescription`). A casual user picks two checkboxes and gets correct retry behavior without understanding anything about LLM prompting. An advanced user composes whatever wording their chosen model handles best.
+**Why LLM-visible signaling is still left to the user, not auto-composed:**
 
-**HITL gate stays orthogonal** — it's configured on the AI Agent node's tool connector, not on the Method node. Coupling it to `safeReadOnly` would block legitimate unsafe-but-autonomous workflows. Docs advise: *"for any Method node with `safeReadOnly: false`, enable HITL on the agent's tool connector."* This is a recommendation, not a mechanism.
+An earlier design auto-prepended structured tags (`[SAFE, IDEMPOTENT]`) to the tool description. Rejected because different LLMs parse bracket syntax differently; the convention assumes the model understands the tag; and advanced users want to compose their own prose tuned to their specific model. The `toolDescription` field therefore stays a single user-editable string, with `$parameter.idempotent` addressable in expressions for anyone who wants to interpolate that flag into their prose.
 
-**UnoQCall gets the same `idempotent` option** (via the Options collection, default `false`) so both entry points to `callWithOptions` behave consistently. Existing UnoQCall workflows keep their current no-retry behavior by default.
+**HITL gate stays orthogonal** — configured on the AI Agent's tool connector, not on the Method node. Docs advise enabling HITL on connectors to any Method node whose guard can't fully express the constraint (e.g. because "safety" depends on external state the guard can't see, or because the operation wants a human sign-off regardless of parameter validity).
+
+**UnoQCall gets `idempotent` only** — no `methodGuard`. Non-AI workflows build params themselves and can validate them with standard n8n nodes (IF, Code, Function) *before* the Call node. The guard exists specifically because an AI Agent fills `$fromAI(...)` params at runtime with no workflow-visible node to intercept.
 
 **What was considered and dropped:**
 
-- **`capabilityPreset` dropdown** (Read-only / Absolute write / Relative write / Custom) as progressive-disclosure UX. Dropped for v2 — two checkboxes with direct-question help text are simpler, and users wanting presets can use n8n's node-template feature. Revisit if feedback indicates the checkboxes confuse casual users.
-- **Auto-composed description field** with hidden expression logic. Dropped per the reasoning above — explicit user control beats invisible magic.
-- **Coupling HITL to `safeReadOnly`**. Dropped — wrong layer, wrong coupling.
+- **`safeReadOnly` boolean flag.** Replaced by `methodGuard`. A static per-method safety assertion is decorative: the bridge can't read it, HITL wires on the connector not the node, and no LLM convention for bracket-tag parsing is universal. A guard enforces at the gate instead of signalling.
+- **`capabilityPreset` dropdown** (Read-only / Absolute write / Relative write / Custom). Dropped — one checkbox plus one optional guard is simpler than a dropdown that explodes into hidden state.
+- **Auto-composed description field** with hidden expression logic. Dropped — explicit user control beats invisible magic.
+- **Coupling HITL to a node-level flag.** Dropped — wrong layer.
+- **Sandboxing the guard** (via `vm2` or similar). Dropped — trusted-user context (anyone who can edit a workflow can write a Code node anyway), and the dependency cost is not justified.
+- **n8n-expression mode for the guard** (as an alternative to a JS function body). Dropped — n8n's expression engine doesn't cleanly see resolved tool params, and supporting two modes with different scopes confuses the mental model. One mode, JS function body, full stop.
 
 **Open items:**
 
-- Router-side `$/methods` introspection (see §8) would let us auto-populate capability metadata from MCU-declared annotations. Not available in current router versions; upstream feature request.
-- If a method registry lands, the Method node UI could collapse to "pick a method" + auto-filled capability flags, with manual override for the weird quadrant.
+- Router-side `$/methods` introspection (see §8) would let us pre-declare per-method parameter schemas, and the guard could default to a schema-derived one. Upstream feature request.
 
 **Implementation phases** (feature branch: `feat/capability-metadata-retry`):
 
-1. **Bridge package.** Add `Bridge.callWithOptions(method, params[], opts)` to [packages/bridge/src/bridge.ts](packages/bridge/src/bridge.ts) implementing the retry contract above. Keep existing `call()` and `callWithTimeout()` as thin backcompat wrappers over it. Add Vitest unit tests in [packages/bridge/test/bridge.test.ts](packages/bridge/test/bridge.test.ts) covering: idempotent retries once on mid-call socket drop, non-idempotent does not retry, no retry on timeout, retry respects the overall `timeoutMs` budget (no second full window). Add a "Retry and idempotency" section to [packages/bridge/README.md](packages/bridge/README.md) with the Venn-quadrant table, the explicit retry contract, and copy-paste expression templates (bracket-tag, prose, minimal) for users composing their own tool descriptions.
-2. **n8n-nodes package.** Add `safeReadOnly` and `idempotent` checkboxes (defaults both `false`) to [packages/n8n-nodes/src/nodes/UnoQTool/UnoQTool.node.ts](packages/n8n-nodes/src/nodes/UnoQTool/UnoQTool.node.ts). Help text phrased as direct questions to the user. `toolDescription` field remains untouched — no auto-composition. `execute()` migrates from `bridge.callWithTimeout(...)` to `bridge.callWithOptions(method, params, { timeoutMs, idempotent })`. [packages/n8n-nodes/src/nodes/UnoQCall/UnoQCall.node.ts](packages/n8n-nodes/src/nodes/UnoQCall/UnoQCall.node.ts) gets an `idempotent` Option in its Options collection (default `false`, preserving current behavior) and the same `callWithOptions` migration.
-3. **Docs.** Three new rows in [CLAUDE.md](CLAUDE.md) troubleshooting table — one for each observable failure mode: bridge over-retried (flip `idempotent:false`), LLM over-retried (check description tag + enable HITL), bridge under-retried (flip `idempotent:true` for genuinely idempotent methods). Brief pointer in top-level [README](README.md) to the bridge README's "Retry and idempotency" section.
-4. **Manual verification on the Q.** Rebuild, `./deploy/sync.sh`, walk through all four Venn quadrants in the agent UI with "Return Intermediate Steps" enabled. Induce a mid-call socket drop (e.g. `sudo systemctl restart arduino-router` during a long-running call) and confirm idempotent auto-retries while non-idempotent surfaces `ConnectionError` cleanly.
+1. **Bridge package.** ✅ Done — `Bridge.callWithOptions(method, params[], opts)` landed with the retry contract above; existing `call()` / `callWithTimeout()` are thin backcompat wrappers. Unit tests in [packages/bridge/test/bridge.test.ts](packages/bridge/test/bridge.test.ts) cover: idempotent retries past multiple reconnects, non-idempotent does not retry, no retry on timeout, retry respects the overall `timeoutMs` budget.
+2. **n8n-nodes package.** Remove `safeReadOnly` and the old `capabilityNotice` from [packages/n8n-nodes/src/nodes/UnoQTool/UnoQTool.node.ts](packages/n8n-nodes/src/nodes/UnoQTool/UnoQTool.node.ts). Add `methodGuard` field (`type: 'string'`, `typeOptions: { editor: 'jsEditor', rows: 6 }`, default `''`). Extend `execute()` to evaluate the guard via `new Function(...)` immediately before `bridge.callWithOptions`. `toolDescription` stays a user-editable string; the placeholder and help text mention only `$parameter.idempotent` (the only remaining flag available to expressions).
+3. **Docs.** Update CLAUDE.md troubleshooting table with one new row covering "LLM keeps proposing destructive values" → add a method guard. Update bridge README to drop `safeReadOnly` references and the 2×2 quadrant framing. Update n8n-nodes README to remove the "Safety flags" section and document the guard with a worked example.
+4. **Manual verification on the Q.** Rebuild, `./deploy/sync.sh`, exercise: (a) a guard rejects an out-of-range value and the LLM sees the rejection string and retries with a corrected value; (b) `idempotent: true` survives a mid-call `sudo systemctl restart arduino-router`; (c) `idempotent: false` surfaces a clean `ConnectionError` on the same disruption.
 
 ### §6.5 Credentials deferred to v2
 

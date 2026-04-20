@@ -71,9 +71,10 @@ export class UnoQTool implements INodeType {
         typeOptions: { rows: 3 },
         default: '',
         required: true,
-        placeholder: 'e.g. Turns the onboard LED on or off. Pass true to turn on, false to turn off.',
+        placeholder:
+          'e.g. =Turns the onboard LED on or off. Pass true to turn on, false to turn off.{{ $parameter.idempotent ? \'\' : \' Do not retry if this errors.\' }}',
         description:
-          'Plain-English description the LLM reads to decide when to call this tool. Be clear and action-oriented.',
+          'Plain-English description the LLM reads to decide when to call this tool. You can interpolate the Idempotent flag below with an n8n expression — e.g. <code>{{ $parameter.idempotent ? \'\' : \'Do not retry on error — state is unknown.\' }}</code>. Wording that steers an LLM well is model-specific; treat any example as a starting point and tune for your model.',
       },
       {
         displayName: 'Method',
@@ -145,24 +146,23 @@ export class UnoQTool implements INodeType {
           'Parameters as a JSON array, e.g. [true, 42, {"foo": "bar"}]. Passed positionally to the MCU method.',
       },
       {
-        // Advisory signal for humans and for the LLM-facing description prose.
-        // Not read at runtime; exposed to expressions as $parameter.safeReadOnly
-        // so users who want a computed bracket tag in the Description can
-        // compose it themselves.
-        displayName: 'Safe (Read-Only)',
-        name: 'safeReadOnly',
-        type: 'boolean',
-        default: false,
-        description:
-          'Whether this method only reads state without changing anything on the MCU. Advisory: used for human-in-the-loop guidance and for composing your own LLM-facing description. Does not affect retry behaviour.',
-      },
-      {
         displayName: 'Idempotent',
         name: 'idempotent',
         type: 'boolean',
         default: false,
         description:
-          'Whether calling this method multiple times with the same parameters leaves the MCU in the same state. When on, the bridge auto-retries once if the socket drops mid-call (within the remaining timeout budget). Leave off for actuators whose effect compounds (relative moves, pulses, counters).',
+          'Whether calling this method multiple times with the same parameters leaves the MCU in the same state. When on, the bridge auto-retries if the socket drops mid-call (within the remaining timeout budget). Leave off for actuators whose effect compounds (relative moves, pulses, counters). An absolute write like set_valve(closed) is idempotent; a relative move like move_stepper(+100) is not.',
+      },
+      {
+        displayName: 'Method Guard',
+        name: 'methodGuard',
+        type: 'string',
+        typeOptions: { editor: 'jsEditor', rows: 6 },
+        default: '',
+        placeholder:
+          '// Decide whether this invocation should go through.\n// Variables in scope:\n//   method  (string)  — the MCU method name.\n//   params  (array)   — positional arguments, already coerced to their declared types.\n//\n// Return true to allow, a string to reject with that exact message,\n// false for a generic rejection, or throw for a hard error.\n\n// Example — clamp an LLM-supplied speed argument:\nif (params[0] > 100) return "Refused: max speed is 100";\nif (params[0] < 0)   return "Refused: speed must be >= 0";\n\n// Example — deny outside business hours:\n// const hour = new Date().getHours();\n// if (hour < 8 || hour >= 18) return "Refused: outside operating hours";\n\nreturn true;',
+        description:
+          'Optional JavaScript body that runs at invocation time and decides whether the call may proceed. Typical uses: vet the parameters the LLM chose, enforce time-of-day windows, check external state, or any other predicate. Two variables are in scope: <code>method</code> (the MCU method name, string) and <code>params</code> (positional arguments, already coerced to their declared types, as an array). Return <code>true</code>, <code>undefined</code>, or <code>null</code> to allow the call. Return <code>false</code> to reject with a generic message. Return any string to reject with that exact message — when this node is wired to an AI Agent, the string is fed back as tool output so the LLM can self-correct. Throwing surfaces the thrown message prefixed with <code>"Method guard threw:"</code>. Runs without a sandbox — same trust model as the n8n Code node. Leave empty to skip.',
       },
       {
         displayName: 'Options',
@@ -212,6 +212,19 @@ export class UnoQTool implements INodeType {
         const idempotent = this.getNodeParameter('idempotent', i, false) as boolean;
 
         const params = buildParams(this, mode, i);
+
+        const guardBody = (this.getNodeParameter('methodGuard', i, '') as string).trim();
+        const rejection = guardBody
+          ? runMethodGuard(this, guardBody, method, params, i)
+          : null;
+
+        if (rejection !== null) {
+          returnData.push({
+            json: { method, params, refused: true, error: rejection },
+            pairedItem: { item: i },
+          });
+          continue;
+        }
 
         const bridge = await manager.getBridge(socketPath);
         const result = await bridge.callWithOptions(method, params, {
@@ -267,6 +280,33 @@ function buildParams(ctx: IExecuteFunctions, mode: ParametersMode, i: number): u
   };
   const entries = collection.parameter ?? [];
   return entries.map((entry, idx) => coerce(ctx, entry.type, entry.value, i, idx));
+}
+
+function runMethodGuard(
+  ctx: IExecuteFunctions,
+  body: string,
+  method: string,
+  params: unknown[],
+  itemIndex: number,
+): string | null {
+  let verdict: unknown;
+  try {
+    verdict = new Function('method', 'params', body)(method, params);
+  } catch (err) {
+    throw new NodeOperationError(
+      ctx.getNode(),
+      `Method guard threw: ${err instanceof Error ? err.message : String(err)}`,
+      { itemIndex },
+    );
+  }
+  if (verdict === true || verdict === undefined || verdict === null) return null;
+  if (verdict === false) return 'Method guard rejected the call';
+  if (typeof verdict === 'string') return verdict;
+  throw new NodeOperationError(
+    ctx.getNode(),
+    `Method guard returned an unexpected value (${typeof verdict}); expected true/undefined, false, or a string`,
+    { itemIndex },
+  );
 }
 
 function coerce(

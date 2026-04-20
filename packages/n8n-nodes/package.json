@@ -50,13 +50,13 @@
   ],
   "author": "Lino Moretto <lino.moretto@gmail.com>",
   "license": "MIT",
-  "homepage": "https://github.com/raasimpact/n8n-uno-q#readme",
+  "homepage": "https://github.com/raas-impact/n8n-uno-q#readme",
   "bugs": {
-    "url": "https://github.com/raasimpact/n8n-uno-q/issues"
+    "url": "https://github.com/raas-impact/n8n-uno-q/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/raasimpact/n8n-uno-q.git",
+    "url": "git+https://github.com/raas-impact/n8n-uno-q.git",
     "directory": "packages/n8n-nodes"
   },
   "engines": {

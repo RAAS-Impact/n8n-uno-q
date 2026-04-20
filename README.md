@@ -7,7 +7,7 @@ The repo ships two npm packages:
 - **[`@raasimpact/arduino-uno-q-bridge`](packages/bridge/)** — a pure Node.js MessagePack-RPC client for `arduino-router` (the Go service that runs on the Q). Zero external dependencies except `@msgpack/msgpack`. Useful on its own for anyone writing Node.js code on a UNO Q — Express, Fastify, Bun, raw scripts.
 - **[`n8n-nodes-uno-q`](packages/n8n-nodes/)** — an n8n community package that depends on the bridge and exposes four nodes: *Arduino UNO Q Call* (action), *Arduino UNO Q Trigger* (MCU → workflow events), *Arduino UNO Q Respond* (companion to Trigger's deferred-response mode), and *Arduino UNO Q Method* (callable by n8n's AI Agent, so an LLM can decide when to read a sensor or fire an actuator as part of reasoning).
 
-For AI-agent workflows touching actuators, read the bridge's [Retry and idempotency](packages/bridge/README.md#retry-and-idempotency) section before wiring up a Method node — the two per-method safety flags (`safeReadOnly`, `idempotent`) decide whether the bridge auto-retries a mid-call socket drop, and getting them right keeps relays from firing twice.
+For AI-agent workflows touching actuators, read the bridge's [Retry and idempotency](packages/bridge/README.md#retry-and-idempotency) section before wiring up a Method node. The `idempotent` checkbox decides whether the bridge auto-retries a mid-call socket drop (keeps relays from firing twice), and the optional **Method Guard** on the Method node lets you reject calls at the gate — by parameter value, time of day, or any other predicate — before they reach the MCU.
 
 ---
 
@@ -22,7 +22,7 @@ End-user flow, assuming a UNO Q out of the box (Docker preinstalled, `arduino-ro
 2. **Grab the compose file:**
    ```bash
    mkdir -p ~/n8n && cd ~/n8n
-   curl -fsSL -O https://raw.githubusercontent.com/raasimpact/n8n-uno-q/main/deploy/docker-compose.yml
+   curl -fsSL -O https://raw.githubusercontent.com/raas-impact/n8n-uno-q/main/deploy/docker-compose.yml
    ```
 3. **Start n8n:**
    ```bash
@@ -68,7 +68,7 @@ For contributors and anyone modifying the packages. Requires Node ≥ 20 on your
 ### First-time setup
 
 ```bash
-git clone https://github.com/raasimpact/n8n-uno-q.git
+git clone https://github.com/raas-impact/n8n-uno-q.git
 cd n8n-uno-q
 npm install
 npm run build

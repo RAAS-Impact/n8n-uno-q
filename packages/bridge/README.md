@@ -116,16 +116,14 @@ await bridge.callWithOptions('set_valve', [0], { idempotent: true });
 await bridge.callWithOptions('move_stepper', [+100]);
 ```
 
-### Two orthogonal properties
+### When to set `idempotent: true`
 
-`safeReadOnly` (does this method change state?) and `idempotent` (can it be replayed?) are independent. All four quadrants exist:
+Ask: *if the socket drops and the bridge replays this call with the same params, does the MCU end up in the same state?*
 
-|                         | **idempotent**                                         | **not idempotent**                      |
-| ----------------------- | ------------------------------------------------------ | --------------------------------------- |
-| **safe (read-only)**    | `read_temperature` — retry freely                      | rare consumable reads (e.g. `pop_event`) |
-| **unsafe (writes)**     | `set_valve(closed)`, `set_led_brightness(50)` — retry OK, still wants human-in-the-loop | `pulse_relay`, `move_stepper(+100)` — never retry |
+- **Yes** — absolute writes (`set_valve(closed)`, `set_led_brightness(50)`), pure reads (`read_temperature`). Safe to retry.
+- **No** — anything whose effect compounds: relative moves (`move_stepper(+100)`), pulses (`pulse_relay`), counters (`increment_and_read`). Must not retry.
 
-The bottom-left (unsafe + idempotent, the "set X to absolute Y" pattern) is the common IoT case. A single flag would either forbid retrying `set_valve(closed)` or permit retrying `pulse_relay` — both wrong.
+The "absolute write" case is the common IoT one and is why the flag isn't just "read-only": `set_valve(closed)` writes to hardware but is still safe to replay.
 
 ### Retry contract
 
@@ -135,21 +133,9 @@ The bottom-left (unsafe + idempotent, the "set X to absolute Y" pattern) is the 
 - Never retry non-idempotent calls regardless of error type.
 - The original `timeoutMs` is the hard cap on total wall time. Once it runs out, the call rejects with `TimeoutError` regardless of how many retries were attempted.
 
-`safeReadOnly` is **not** read by the bridge. It is a user-facing signal for the LLM-layer tool description (when this library is used via `n8n-nodes-uno-q`) and for human reviewers choosing which tools need human-in-the-loop gating. Keep the two flags separate so your signaling to the LLM stays under your control.
+### LLM-facing tool descriptions
 
-### Tool description templates
-
-If you are exposing a method to an LLM agent, the safety signaling belongs in the tool description prose — not in magic bracket tags the bridge invents for you. Pick a style and use it consistently; different models parse different conventions best.
-
-**Bracket tag** — compact, machine-friendly:
-
-```
-[SAFE, IDEMPOTENT] Reads the onboard temperature in °C.
-[UNSAFE, IDEMPOTENT] Sets the valve to the given percentage open (0–100).
-[UNSAFE, NON-IDEMPOTENT] Pulses the relay for one tick — do not call twice.
-```
-
-**Prose** — for models that handle natural-language cues better than tags:
+If you are exposing a method to an LLM agent (directly or through `n8n-nodes-uno-q`), the safety signaling belongs in the tool description prose — the bridge does not prepend tags for you. Different models parse different conventions best; pick one and use it consistently. A few templates:
 
 ```
 Reads the onboard temperature. Safe to call any time; no side effects.
@@ -157,13 +143,7 @@ Sets the valve to the given percentage open. Retryable — repeating the call wi
 Pulses the relay once. Each call advances state — never call this twice for the same intended action.
 ```
 
-**Minimal** — trust the LLM and the HITL gate, keep descriptions terse:
-
-```
-Read onboard temperature.
-Set valve open percentage (0–100).
-Pulse the relay once.
-```
+For per-*invocation* enforcement (rejecting specific calls at the gate — bad parameters, wrong time of day, external-state gating), use the `n8n-nodes-uno-q` Method node's **Method Guard** field — a small JS function that inspects `method` + `params` and returns a rejection string that the agent sees as tool output.
 
 ## Running inside Docker
 

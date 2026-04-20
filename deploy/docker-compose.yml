@@ -14,6 +14,10 @@ services:
       - TZ=Europe/Malta
       - N8N_COMMUNITY_PACKAGES_ENABLED=true
       - N8N_COMMUNITY_PACKAGES_ALLOW_TOOL_USAGE=true
+      # Since n8n 2.15.0 this flag also gates the temporary session data the editor
+      # needs for log redaction; with it off the container spams "Skipping execution
+      # data push: unable to resolve user for redaction". Leave on for a usable editor.
+      - EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS=true
       # LAN access via http://<q-hostname>:5678 — no TLS terminator in front of n8n.
       # Put a reverse proxy with a cert in front if exposing beyond the local network.
       - N8N_SECURE_COOKIE=false
