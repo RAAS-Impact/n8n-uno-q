@@ -1,5 +1,6 @@
 /**
- * integration-test.ino — MCU sketch for end-to-end validation of the Bridge package.
+ * integration-test.ino — MCU sketch for end-to-end validation of the Bridge
+ * package.
  *
  * Exposes multiple methods to exercise different RPC patterns:
  * - set_led_state(bool)   → write, returns null
@@ -12,6 +13,7 @@
  *
  * Flash this sketch via App Lab before running the Node.js test script.
  */
+#include <ArduinoJson.h>
 #include <Arduino_LED_Matrix.h>
 #include <Arduino_RouterBridge.h>
 Arduino_LED_Matrix matrix;
@@ -39,6 +41,26 @@ uint8_t LOGO[104] = {
 // Track when to clear the matrix after showing the logo
 unsigned long logoClearTime = 0;
 bool logoShowing = false;
+
+// --- Helpers ---
+
+// Print the reply from a Bridge.call() regardless of return type.
+// hideakitai/MsgPack's deserializeMsgPack re-parses the full response buffer,
+// so `resp` holds the entire RPC envelope [RESP_MSG, msg_id, error, result] —
+// element [3] is the actual return value.
+template <typename RC> void printBridgeReply(RC &&rc) {
+  DynamicJsonDocument resp(512);
+  if (rc.result(resp)) {
+    String out;
+    serializeJson(resp[3], out);
+    Monitor.println(out);
+  } else {
+    Monitor.print("err ");
+    Monitor.print(rc.getErrorCode());
+    Monitor.print(": ");
+    Monitor.println(rc.getErrorMessage().c_str());
+  }
+}
 
 // --- Method handlers ---
 
@@ -111,17 +133,10 @@ void loop() {
     Monitor.println("Interrupt fired!");
     interruptFired = false;
 
-    Monitor.println("Calling gpio_event... ");
+    Monitor.print("Calling gpio_event... ");
     auto rc = Bridge.call("gpio_event", 2);
-    MsgPack::str_t reply;
-    if (rc.result(reply)) {
-      Monitor.println(reply.c_str());
-    } else {
-      Monitor.print("err ");
-      Monitor.print(rc.getErrorCode());
-      Monitor.print(": ");
-      Monitor.println(rc.getErrorMessage().c_str());
-    }
+    Monitor.println("done.");
+    printBridgeReply(rc);
 
     set_led_state(!ledState);
   }
