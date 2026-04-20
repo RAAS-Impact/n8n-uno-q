@@ -34,6 +34,7 @@ Add an *Arduino UNO Q Method* node per MCU method you want the agent to have acc
 - **Parameters** — for each argument the LLM should provide, put `{{ $fromAI('name', 'description', 'type') }}` in the Value field. Static values pass through unchanged.
 - **Idempotent** — the one retry flag. See [Idempotency and retry](#idempotency-and-retry) below.
 - **Method Guard** — optional JS predicate that decides whether each invocation may proceed. See [Method guard](#method-guard) below.
+- **Rate Limit** — optional cap on invocations per minute/hour/day. See [Rate limit and budget](#rate-limit-and-budget) below.
 
 Example for an LED on/off tool:
 
@@ -55,11 +56,18 @@ The *Arduino UNO Q Call* node (non-AI) has the same top-level **Idempotent** che
 
 ## Method guard
 
-An AI Agent fills `$fromAI(...)` parameters at runtime — there is no workflow-visible node to intercept and validate. The **Method Guard** is a small JavaScript body you can attach to a Method node to decide, at invocation time, whether the call should proceed. It gets `method` (string) and `params` (array, coerced to their declared types) in scope. Typical uses:
+An AI Agent fills `$fromAI(...)` parameters at runtime — there is no workflow-visible node to intercept and validate. The **Method Guard** is a small JavaScript body you can attach to a Method node to decide, at invocation time, whether the call should proceed. It gets three variables in scope:
+
+- `method` — the MCU method name (string).
+- `params` — positional arguments, coerced to their declared types (array).
+- `budget` — a read-only view of recent call history for this node (see [Rate limit and budget](#rate-limit-and-budget) below).
+
+Typical uses:
 
 - **Argument validation** — clamp numeric ranges, reject destructive strings, require non-empty values.
 - **Time-of-day / calendar gating** — deny calls outside operating hours.
 - **External-state checks** — read a flag, poll a cache, forbid calls during a maintenance window.
+- **Traffic-aware rejection** — using `budget.used(window)` or `budget.remaining`, reserve quota for higher-priority requests or apply a soft cap without committing to a hard one.
 
 Return values decide the fate of the call:
 
@@ -67,6 +75,8 @@ Return values decide the fate of the call:
 - `false` — reject with a generic message.
 - any string — reject with that exact string; when wired to an Agent, the string is fed back as tool output so the LLM can self-correct.
 - `throw` — the thrown message surfaces prefixed with `"Method guard threw:"`.
+
+A **rejected call does not consume rate-limit budget** — only calls that pass both gates and reach the MCU count toward `maxCalls`.
 
 Example — clamp a speed argument and close the door outside business hours:
 
@@ -82,6 +92,46 @@ return true;
 ```
 
 The guard runs **without a sandbox**, same trust model as n8n's Code node. Leave the field empty to skip. The *Arduino UNO Q Call* node has no equivalent — non-AI workflows can gate with standard IF/Code nodes before the Call.
+
+## Rate limit and budget
+
+An LLM driving the Agent can issue tool calls faster than a microcontroller wants to handle them — bursts from retry loops, exploratory prompting, or just an eager model can swamp the MCU or eat actuator life. The **Rate Limit** field on the Method node caps invocations in a sliding window:
+
+- **Max Calls** — integer, e.g. `10`.
+- **Per** — `minute`, `hour`, or `day`.
+
+When exceeded, the node returns `{ refused: true, error: "Refused: rate limit of 10 per minute exceeded. Retry in ~Xs." }` — the same rejection shape the Method Guard uses, so the LLM can read it and back off. The check runs **before** the Method Guard, so rate-limited calls never execute guard code and never reach the MCU.
+
+Counters are in-memory per n8n process. They reset when the container restarts, and they are **not shared across queue-mode workers** (one more reason queue mode is unsupported, see [Limits](#limits)).
+
+### `budget` in the Method Guard
+
+The Method Guard sees a `budget` object whether or not the Rate Limit field is configured, so you can build traffic-aware policies in either setup:
+
+| Property | Type | Meaning |
+|---|---|---|
+| `budget.used(window)` | `(window: 'minute' \| 'hour' \| 'day') => number` | Prior successful calls in the last `window`. Always available. |
+| `budget.remaining` | `number \| null` | Calls left under the Rate Limit field. `null` when no cap is configured. |
+| `budget.resetsInMs` | `number \| null` | Ms until the oldest in-window call rolls off. `null` when the window is empty or no cap is configured. |
+
+Three patterns you can compose:
+
+```js
+// Pattern 1 — hard cap (no guard needed). Set Rate Limit and leave guard empty.
+
+// Pattern 2 — soft cap without committing to enforcement. Works even with no
+// Rate Limit set, since budget.used always tracks history.
+if (budget.used("minute") >= 20) return "Refused: soft cap at 20/min";
+return true;
+
+// Pattern 3 — prioritise. Hard cap plus reservation for critical calls.
+// Rate Limit is set (e.g. 10/min); this guard keeps the last 3 slots for
+// params that matter most.
+if (budget.remaining !== null && budget.remaining < 3 && params[0] < 50) {
+  return "Refused: near quota, reserving remaining calls for higher priority";
+}
+return true;
+```
 
 ## Limits
 

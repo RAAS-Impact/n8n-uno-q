@@ -40,7 +40,7 @@ The two npm packages are useful regardless of whether phase 3 succeeds — they'
 
 ---
 
-## 3. Verified facts about my UNO Q (hostname: `linucs`)
+## 3. Verified facts about my UNO Q (hostname: `linucs.local`)
 
 All the following were checked on my physical board in April 2026. Don't assume they hold on other boards — re-verify before generalizing.
 
@@ -291,17 +291,19 @@ Since descriptions must be typed by the user into n8n, encourage MCU developers 
 Bridge.provide("set_led_state", set_led_state);
 ```
 
-**Capability metadata, retry contract, and method guards (v2 addition)**
+**Capability metadata, retry contract, method guards, and rate limiting (v2 addition)**
 
-Extends the Method node design for agent-driven hardware scenarios. Two motivating problems:
+Extends the Method node design for agent-driven hardware scenarios. Three motivating problems:
 
 1. **Mid-call socket drops.** When `arduino-router` blips, the MCU may have already executed a write but the RESPONSE never made it back. A naïve retry — by the bridge OR by the LLM reacting to a tool error — fires the actuator twice.
 2. **Invocations that need per-call vetting.** Even a well-described tool can be invoked with a destructive parameter (`set_motor_speed(9999)`, `delete_record("*")`) or at an inappropriate moment (outside business hours, during a maintenance window). Static per-method "safe/unsafe" metadata cannot distinguish safe from unsafe *invocations*; the decision depends on the actual arguments and on runtime conditions the MCU can't see.
+3. **LLM-driven throughput spikes.** An AI Agent can issue tool calls faster than a constrained microcontroller wants to handle — retry loops, exploratory prompting, or an eager model can swamp the MCU, wear actuators, or burn through an external budget. The workflow author doesn't pick the timing (the LLM does), so the cap has to live on the tool node itself, not upstream in the workflow.
 
-**Two runtime mechanisms, one per problem:**
+**Three runtime mechanisms, one per problem:**
 
 - **`idempotent`** — boolean, per Method node, default `false`. Passed to `bridge.callWithOptions(..., { idempotent })`. Gates auto-retry on `ConnectionError`. Answers: *"if the socket drops, is it safe for the bridge to replay this?"*
-- **`methodGuard`** — optional JavaScript function body, per Method node, empty by default. Evaluated at invocation time with `method` (string) and `params` (array) in scope. Typical uses: argument validation, time-of-day gating, external-state checks. Return `true`/`undefined` to allow, `false` for a generic rejection, a string to reject with that message, or throw. When wired to an AI Agent, the rejection message surfaces as tool output so the LLM can self-correct.
+- **`methodGuard`** — optional JavaScript function body, per Method node, empty by default. Evaluated at invocation time with `method` (string), `params` (array), and `budget` (see rate-limit contract below) in scope. Typical uses: argument validation, time-of-day gating, external-state checks, traffic-aware rejection. Return `true`/`undefined` to allow, `false` for a generic rejection, a string to reject with that message, or throw. When wired to an AI Agent, the rejection message surfaces as tool output so the LLM can self-correct.
+- **`rateLimit`** — optional structured field (`maxCalls` + sliding `window` of `minute`/`hour`/`day`), per Method node, default unset. A sliding-window counter caps invocations that actually reach the MCU. When exceeded, the node short-circuits with a rejection string of the same shape the guard uses, so the LLM can back off.
 
 **Bridge-level retry contract** (implemented in [packages/bridge/src/bridge.ts](packages/bridge/src/bridge.ts) via `callWithOptions`):
 
@@ -314,12 +316,25 @@ Extends the Method node design for agent-driven hardware scenarios. Two motivati
 
 **Method guard contract** (implemented in [packages/n8n-nodes/src/nodes/UnoQTool/UnoQTool.node.ts](packages/n8n-nodes/src/nodes/UnoQTool/UnoQTool.node.ts) inside `execute()`):
 
-- Guard body is wrapped as `new Function('method', 'params', <body>)` — no sandbox, same trust model as the n8n Code node.
-- Runs after params are built and coerced, before `bridge.callWithOptions`.
+- Guard body is wrapped as `new Function('method', 'params', 'budget', <body>)` — no sandbox, same trust model as the n8n Code node.
+- Runs after params are built and coerced, after the rate-limit check, before `bridge.callWithOptions`.
 - Return `true` / `undefined` / `null` → allow. Return `false` → reject with a generic message. Return a string → reject with that string. Throw → genuine workflow error, prefixed `Method guard threw:` (reserved for guard bugs — JS syntax errors, unexpected return types).
 - Rejections are emitted as a **structured tool output** `{ method, params, refused: true, error: "<message>" }`, not thrown. n8n's `usableAsTool` wrapper does not reliably surface thrown `NodeOperationError`s to the LLM's observation stream (they fall onto the workflow-error bus); returning as data keeps the rejection reachable to the agent so it can self-correct. Non-AI workflows can branch on `json.refused`.
 - Empty guard body skips evaluation entirely. Default is empty.
 - The UI uses n8n's `jsEditor` widget (`typeOptions.editor: 'jsEditor'`) — syntax-highlighted JavaScript without the `$json`/`$input` autocompletes of `codeNodeEditor`, since those globals aren't provided.
+
+**Rate limit and `budget` contract** (implemented in [packages/n8n-nodes/src/rateLimiter.ts](packages/n8n-nodes/src/rateLimiter.ts) + consumed by [UnoQTool.node.ts](packages/n8n-nodes/src/nodes/UnoQTool/UnoQTool.node.ts)):
+
+- **Gate order per item:** `buildParams → checkRateLimit → methodGuard → recordCall → bridge.callWithOptions`. Rate-limit rejection short-circuits the guard; guard rejection skips `recordCall`, so a rejected call does **not** consume budget that a later legitimate call might need. Recording only happens for calls that reach the MCU.
+- **Counter storage.** One map per process, stashed on `globalThis[Symbol.for('@raasimpact/arduino-uno-q/rate-limiter')]` for the same reason `BridgeManager` uses globalThis: each node file is bundled independently by esbuild. Keyed `${node.id}:${method}` — node ids are UUIDs unique across the n8n instance, so multiple UnoQTool nodes don't cross-contaminate and renaming the method on a node cleanly resets its history.
+- **Sliding window, lazy cleanup.** Timestamps are filtered by `now - windowMs` on every read; `recordCall` trims to the 24h day-retention cap on every write. No background timer.
+- **In-memory only.** Resets on container restart, not shared across queue-mode workers. Already a non-goal (§6.4 singleton client), but the rate-limit feature inherits the same limit and it's documented in the UI copy.
+- **`budget` in guard scope** (a read-only view of the counter):
+  - `budget.used(window)` → `number` — successful calls recorded in the last `'minute' | 'hour' | 'day'`. Always works, regardless of whether `rateLimit` is configured.
+  - `budget.remaining` → `number | null` — `cap - used(configuredWindow)` when `rateLimit` is set, `null` otherwise.
+  - `budget.resetsInMs` → `number | null` — ms until the oldest in-window call rolls off when `rateLimit` is set and the window has at least one call, `null` otherwise.
+- **Why `budget` is exposed even with no cap.** Lets a guard implement a soft cap ("reject if >20/min") without having to commit to hard enforcement, and lets advanced policies inspect call history cheaply. The common "just cap at N" case still works by filling in the structured field and leaving the guard empty.
+- **Rejection message shape.** `Refused: rate limit of ${cap} per ${window} exceeded. Retry in ~${seconds}s.` — mirrors the guard's convention so the LLM only needs one pattern.
 
 **Why a guard replaces the earlier `safeReadOnly` flag:**
 
@@ -333,7 +348,7 @@ An earlier design auto-prepended structured tags (`[SAFE, IDEMPOTENT]`) to the t
 
 **HITL gate stays orthogonal** — configured on the AI Agent's tool connector, not on the Method node. Docs advise enabling HITL on connectors to any Method node whose guard can't fully express the constraint (e.g. because "safety" depends on external state the guard can't see, or because the operation wants a human sign-off regardless of parameter validity).
 
-**UnoQCall gets `idempotent` only** — no `methodGuard`. Non-AI workflows build params themselves and can validate them with standard n8n nodes (IF, Code, Function) *before* the Call node. The guard exists specifically because an AI Agent fills `$fromAI(...)` params at runtime with no workflow-visible node to intercept.
+**UnoQCall gets `idempotent` only** — no `methodGuard`, no `rateLimit`. Non-AI workflows build params themselves and can validate them with standard n8n nodes (IF, Code, Function) *before* the Call node, and pace throughput with SplitInBatches, Wait, or Loop Over Items. The guard and rate-limit fields exist specifically because an AI Agent fills `$fromAI(...)` params at runtime and picks its own timing — there is no workflow-visible node to intercept or throttle.
 
 **What was considered and dropped:**
 
@@ -348,12 +363,7 @@ An earlier design auto-prepended structured tags (`[SAFE, IDEMPOTENT]`) to the t
 
 - Router-side `$/methods` introspection (see §8) would let us pre-declare per-method parameter schemas, and the guard could default to a schema-derived one. Upstream feature request.
 
-**Implementation phases** (feature branch: `feat/capability-metadata-retry`):
-
-1. **Bridge package.** ✅ Done — `Bridge.callWithOptions(method, params[], opts)` landed with the retry contract above; existing `call()` / `callWithTimeout()` are thin backcompat wrappers. Unit tests in [packages/bridge/test/bridge.test.ts](packages/bridge/test/bridge.test.ts) cover: idempotent retries past multiple reconnects, non-idempotent does not retry, no retry on timeout, retry respects the overall `timeoutMs` budget.
-2. **n8n-nodes package.** Remove `safeReadOnly` and the old `capabilityNotice` from [packages/n8n-nodes/src/nodes/UnoQTool/UnoQTool.node.ts](packages/n8n-nodes/src/nodes/UnoQTool/UnoQTool.node.ts). Add `methodGuard` field (`type: 'string'`, `typeOptions: { editor: 'jsEditor', rows: 6 }`, default `''`). Extend `execute()` to evaluate the guard via `new Function(...)` immediately before `bridge.callWithOptions`. `toolDescription` stays a user-editable string; the placeholder and help text mention only `$parameter.idempotent` (the only remaining flag available to expressions).
-3. **Docs.** Update CLAUDE.md troubleshooting table with one new row covering "LLM keeps proposing destructive values" → add a method guard. Update bridge README to drop `safeReadOnly` references and the 2×2 quadrant framing. Update n8n-nodes README to remove the "Safety flags" section and document the guard with a worked example.
-4. **Manual verification on the Q.** Rebuild, `./deploy/sync.sh`, exercise: (a) a guard rejects an out-of-range value and the LLM sees the rejection string and retries with a corrected value; (b) `idempotent: true` survives a mid-call `sudo systemctl restart arduino-router`; (c) `idempotent: false` surfaces a clean `ConnectionError` on the same disruption.
+**Status:** shipped. `idempotent` + `callWithOptions` retry landed in bridge 0.2.0; `methodGuard` landed in n8n-nodes 0.2.0; `rateLimit` + `budget`-in-guard landed in n8n-nodes 0.2.1. See the respective [CHANGELOGs](packages/n8n-nodes/CHANGELOG.md) for per-release detail.
 
 ### §6.5 Credentials deferred to v2
 

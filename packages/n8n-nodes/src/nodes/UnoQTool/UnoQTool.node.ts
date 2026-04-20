@@ -6,6 +6,13 @@ import {
   type INodeTypeDescription,
 } from 'n8n-workflow';
 import { BridgeManager } from '../../BridgeManager.js';
+import {
+  checkRateLimit,
+  countInWindow,
+  recordCall,
+  resetsInMs,
+  type RateLimitWindow,
+} from '../../rateLimiter.js';
 
 type ParameterType = 'string' | 'number' | 'boolean' | 'json';
 type ParametersMode = 'none' | 'fields' | 'json';
@@ -160,9 +167,40 @@ export class UnoQTool implements INodeType {
         typeOptions: { editor: 'jsEditor', rows: 6 },
         default: '',
         placeholder:
-          '// Decide whether this invocation should go through.\n// Variables in scope:\n//   method  (string)  — the MCU method name.\n//   params  (array)   — positional arguments, already coerced to their declared types.\n//\n// Return true to allow, a string to reject with that exact message,\n// false for a generic rejection, or throw for a hard error.\n\n// Example — clamp an LLM-supplied speed argument:\nif (params[0] > 100) return "Refused: max speed is 100";\nif (params[0] < 0)   return "Refused: speed must be >= 0";\n\n// Example — deny outside business hours:\n// const hour = new Date().getHours();\n// if (hour < 8 || hour >= 18) return "Refused: outside operating hours";\n\nreturn true;',
+          '// Decide whether this invocation should go through.\n// Variables in scope:\n//   method  (string)   — the MCU method name.\n//   params  (array)    — positional args, coerced to their declared types.\n//   budget  (object)   — peek at call history (always present):\n//     budget.used("minute" | "hour" | "day")  → prior calls in that window\n//     budget.remaining                         → calls left under the Rate\n//                                                Limit field, or null if\n//                                                no cap is set\n//     budget.resetsInMs                        → ms until the oldest\n//                                                in-window call rolls off,\n//                                                or null if empty\n//\n// Return true to allow, a string to reject with that exact message,\n// false for a generic rejection, or throw for a hard error.\n\n// Example — clamp an LLM-supplied speed argument:\nif (params[0] > 100) return "Refused: max speed is 100";\nif (params[0] < 0)   return "Refused: speed must be >= 0";\n\n// Example — reserve the last few slots for high-priority calls:\n// if (budget.remaining !== null && budget.remaining < 3 && params[0] < 50) {\n//   return "Refused: near quota, reserving for higher-priority calls";\n// }\n\n// Example — soft cap even without a Rate Limit configured:\n// if (budget.used("minute") > 20) return "Refused: too many calls this minute";\n\nreturn true;',
         description:
-          'Optional JavaScript body that runs at invocation time and decides whether the call may proceed. Typical uses: vet the parameters the LLM chose, enforce time-of-day windows, check external state, or any other predicate. Two variables are in scope: <code>method</code> (the MCU method name, string) and <code>params</code> (positional arguments, already coerced to their declared types, as an array). Return <code>true</code>, <code>undefined</code>, or <code>null</code> to allow the call. Return <code>false</code> to reject with a generic message. Return any string to reject with that exact message — when this node is wired to an AI Agent, the string is fed back as tool output so the LLM can self-correct. Throwing surfaces the thrown message prefixed with <code>"Method guard threw:"</code>. Runs without a sandbox — same trust model as the n8n Code node. Leave empty to skip.',
+          'Optional JavaScript body that runs at invocation time and decides whether the call may proceed. Typical uses: vet the parameters the LLM chose, enforce time-of-day windows, check external state, or make traffic-aware decisions using <code>budget</code>. Variables in scope: <code>method</code> (string), <code>params</code> (array, coerced to their declared types), and <code>budget</code> (object). <code>budget.used(window)</code> returns prior calls recorded in the last <code>"minute"</code>, <code>"hour"</code>, or <code>"day"</code> — works regardless of whether the Rate Limit field is set, so you can write soft caps here. <code>budget.remaining</code> and <code>budget.resetsInMs</code> are numbers when the Rate Limit field is configured and <code>null</code> otherwise. Return <code>true</code>, <code>undefined</code>, or <code>null</code> to allow the call. Return <code>false</code> to reject with a generic message. Return any string to reject with that exact message — when wired to an AI Agent, the string is fed back as tool output so the LLM can self-correct. Throwing surfaces the thrown message prefixed with <code>"Method guard threw:"</code>. Runs without a sandbox — same trust model as the n8n Code node. Leave empty to skip.',
+      },
+      {
+        displayName: 'Rate Limit',
+        name: 'rateLimit',
+        type: 'collection',
+        placeholder: 'Add Rate Limit',
+        default: {},
+        description:
+          'Cap how often this method may be invoked. Exceeding the limit short-circuits the call with a rejection string the LLM can read — same path as the Method Guard. Counters are in-memory per n8n process; they reset on container restart and are not shared across queue-mode workers.',
+        options: [
+          {
+            displayName: 'Max Calls',
+            name: 'maxCalls',
+            type: 'number',
+            default: 10,
+            typeOptions: { minValue: 1 },
+            description: 'Maximum invocations allowed within the selected window.',
+          },
+          {
+            displayName: 'Per',
+            name: 'window',
+            type: 'options',
+            options: [
+              { name: 'Minute', value: 'minute' },
+              { name: 'Hour', value: 'hour' },
+              { name: 'Day', value: 'day' },
+            ],
+            default: 'minute',
+            description: 'Sliding time window against which Max Calls is measured.',
+          },
+        ],
       },
       {
         displayName: 'Options',
@@ -213,9 +251,36 @@ export class UnoQTool implements INodeType {
 
         const params = buildParams(this, mode, i);
 
+        // Single counter key shared between the Rate Limit enforcer and the
+        // guard's `budget` view — pairing method with node id so renaming the
+        // method on a node cleanly resets its history.
+        const counterKey = `${this.getNode().id}:${method}`;
+        const rateLimit = this.getNodeParameter('rateLimit', i, {}) as {
+          maxCalls?: number;
+          window?: RateLimitWindow;
+        };
+        const rateLimitCap =
+          rateLimit.maxCalls && rateLimit.maxCalls > 0 ? rateLimit.maxCalls : null;
+        const rateLimitWindow: RateLimitWindow = rateLimit.window ?? 'minute';
+
+        if (rateLimitCap !== null) {
+          const verdict = checkRateLimit(counterKey, rateLimitCap, rateLimitWindow);
+          if (!verdict.allowed) {
+            const retrySeconds = Math.max(1, Math.ceil(verdict.retryAfterMs / 1000));
+            const msg = `Refused: rate limit of ${rateLimitCap} per ${rateLimitWindow} exceeded. Retry in ~${retrySeconds}s.`;
+            returnData.push({
+              json: { method, params, refused: true, error: msg },
+              pairedItem: { item: i },
+            });
+            continue;
+          }
+        }
+
+        const budget = buildBudget(counterKey, rateLimitCap, rateLimitWindow);
+
         const guardBody = (this.getNodeParameter('methodGuard', i, '') as string).trim();
         const rejection = guardBody
-          ? runMethodGuard(this, guardBody, method, params, i)
+          ? runMethodGuard(this, guardBody, method, params, budget, i)
           : null;
 
         if (rejection !== null) {
@@ -225,6 +290,10 @@ export class UnoQTool implements INodeType {
           });
           continue;
         }
+
+        // Record only after both gates pass — a rejected call should not
+        // consume budget that a later legitimate call might need.
+        recordCall(counterKey);
 
         const bridge = await manager.getBridge(socketPath);
         const result = await bridge.callWithOptions(method, params, {
@@ -282,16 +351,35 @@ function buildParams(ctx: IExecuteFunctions, mode: ParametersMode, i: number): u
   return entries.map((entry, idx) => coerce(ctx, entry.type, entry.value, i, idx));
 }
 
+interface GuardBudget {
+  used: (window: RateLimitWindow) => number;
+  remaining: number | null;
+  resetsInMs: number | null;
+}
+
+function buildBudget(
+  counterKey: string,
+  cap: number | null,
+  capWindow: RateLimitWindow,
+): GuardBudget {
+  return {
+    used: (window: RateLimitWindow) => countInWindow(counterKey, window),
+    remaining: cap !== null ? Math.max(0, cap - countInWindow(counterKey, capWindow)) : null,
+    resetsInMs: cap !== null ? resetsInMs(counterKey, capWindow) : null,
+  };
+}
+
 function runMethodGuard(
   ctx: IExecuteFunctions,
   body: string,
   method: string,
   params: unknown[],
+  budget: GuardBudget,
   itemIndex: number,
 ): string | null {
   let verdict: unknown;
   try {
-    verdict = new Function('method', 'params', body)(method, params);
+    verdict = new Function('method', 'params', 'budget', body)(method, params, budget);
   } catch (err) {
     throw new NodeOperationError(
       ctx.getNode(),
