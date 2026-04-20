@@ -16,6 +16,15 @@ export class BridgeManager {
   private bridge: Bridge | null = null;
   private refCount = 0;
   private methodRefs = new Map<string, number>();
+  /**
+   * Tracks the in-progress background close scheduled by a prior release().
+   * acquire() and getBridge() await this before opening a fresh socket —
+   * otherwise a rapid release→acquire cycle (e.g. deactivate then immediately
+   * reactivate a workflow) leaves two sockets live on the router briefly, and
+   * the router rejects the new $/register calls for methods still owned by
+   * the old connection.
+   */
+  private pendingClose: Promise<void> | null = null;
 
   static getInstance(): BridgeManager {
     const g = globalThis as unknown as Record<symbol, BridgeManager | undefined>;
@@ -26,6 +35,9 @@ export class BridgeManager {
   }
 
   async acquire(socketPath?: string): Promise<Bridge> {
+    if (this.pendingClose) {
+      await this.pendingClose;
+    }
     this.refCount++;
     if (!this.bridge) {
       this.bridge = await Bridge.connect({ socket: socketPath });
@@ -40,6 +52,9 @@ export class BridgeManager {
    * lifecycle that triggers use to decide when to close the socket.
    */
   async getBridge(socketPath?: string): Promise<Bridge> {
+    if (this.pendingClose) {
+      await this.pendingClose;
+    }
     if (!this.bridge) {
       this.bridge = await Bridge.connect({ socket: socketPath });
     }
@@ -58,11 +73,20 @@ export class BridgeManager {
       // closeFunction on the same execution path that later needs to run the
       // downstream UnoQRespond — blocking here deadlocks the workflow: Respond
       // never runs, handler never resolves, drain never returns.
-      void oldBridge
+      //
+      // Subsequent acquire()/getBridge() await pendingClose so new connections
+      // wait for the old one to finish tearing down.
+      const closePromise = oldBridge
         .waitForActiveHandlers(60_000)
         .catch(() => {})
         .then(() => oldBridge.close())
         .catch(() => {});
+      this.pendingClose = closePromise;
+      void closePromise.finally(() => {
+        if (this.pendingClose === closePromise) {
+          this.pendingClose = null;
+        }
+      });
     }
   }
 

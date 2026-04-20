@@ -113,9 +113,11 @@ describe('BridgeManager close race', () => {
       const bridgeA = await manager.acquire(router.socketPath);
       bridgeA.on('error', () => {}); // suppress unhandled-error noise
 
-      // Install a provide handler that never resolves. This keeps
-      // activeHandlers populated so waitForActiveHandlers(60_000) inside
-      // release() cannot return immediately — exposing the race window.
+      // Install a provide handler that resolves after ~300ms — models a real
+      // UnoQRespond firing shortly after the user deactivates the workflow.
+      // This keeps activeHandlers populated long enough to hold the old
+      // bridge open during the release→acquire window, then drains cleanly
+      // so the fix (which awaits previous close in acquire) can complete.
       let resolveStuck: (v: unknown) => void = () => {};
       await bridgeA.provide('stuck', () => {
         return new Promise((resolve) => {
@@ -127,25 +129,24 @@ describe('BridgeManager close race', () => {
       await new Promise((r) => setTimeout(r, 50));
       expect(bridgeA.activeHandlerCount).toBe(1);
 
-      // Release starts a background close that will stall on the pending
-      // handler for up to 60s. The old socket stays connected during this
-      // time.
+      // Schedule handler resolution. Without the fix, acquire(B) returns
+      // immediately and both sockets are observed as live. With the fix,
+      // acquire(B) awaits the tracked close — which completes ~300ms later
+      // when the handler resolves and the socket teardown finishes.
+      setTimeout(() => resolveStuck('done'), 300);
+
+      // Release starts the background close.
       await manager.release();
 
-      // Immediately acquire a new bridge — this is the window the race lives in.
+      // Acquire a new bridge. Before the fix: returns instantly with a fresh
+      // connection while the old one is still open → 2 sockets on the router.
+      // After the fix: blocks until pendingClose resolves → only B's socket.
       const bridgeB = await manager.acquire(router.socketPath);
       bridgeB.on('error', () => {});
-      await new Promise((r) => setTimeout(r, 50));
 
-      // Expected after fix: acquire() should have waited for the previous
-      // close to complete, leaving only one live connection. Currently it
-      // doesn't, so the mock sees two clients (A still hanging on the stuck
-      // handler, B freshly opened).
       expect(router.clients.length).toBe(1);
 
-      // Cleanup: unblock A's stuck handler so it can close, then release B
-      resolveStuck('done');
-      await new Promise((r) => setTimeout(r, 100));
+      // Cleanup: release B so the connection doesn't leak past the test
       await manager.release();
       await new Promise((r) => setTimeout(r, 100));
     } finally {
