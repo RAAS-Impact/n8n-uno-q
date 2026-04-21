@@ -367,6 +367,8 @@ An earlier design auto-prepended structured tags (`[SAFE, IDEMPOTENT]`) to the t
 
 ### §6.5 Credentials deferred to v2
 
+> **Update (2026-04-21):** superseded by §12. The v2 triggers listed below (TCP support, multi-Q deployments) are now designed in the `feat/multi-q` branch — credentials land as `UnoQRouterApi` alongside the bridge HAL refactor and the Tailscale relay container. Keep this section for historical context; §12.4 is authoritative.
+
 An earlier draft of this plan included a `UnoQ Credentials` resource as the standard n8n pattern for sharing connection configuration across nodes. Reconsidered: it's premature in v1.
 
 **Why skip it now:**
@@ -547,3 +549,414 @@ Router version at time of testing: **0.8.0**.
 - **Versioning:** start at `0.1.0`. Semver strict once we hit `1.0.0`.
 - **License:** MIT (revisit if Arduino's GPL router imposes anything on a protocol-level client — it shouldn't, but worth a quick legal sanity check before first publish).
 - **Update this file** whenever a decision changes. Don't let it go stale. Procedures, commands, and style conventions live in [CLAUDE.md](CLAUDE.md); update them there.
+
+---
+
+## 12. Multi-Q support
+
+**Status:** designed on the `feat/multi-q` branch as of 2026-04-21. Not yet implemented. This section is the authoritative spec — start here when picking up the feature.
+
+### 12.1 Motivation
+
+Today a single n8n instance talks to a single UNO Q via the local unix socket, same host. The multi-Q story covers two scenarios:
+
+1. **Remote dev access.** Developer's PC running n8n locally needs to reach a Q across the network. Current workaround is an SSH-tunneled unix socket (§9, CLAUDE.md); fine for occasional tests, clunky for continuous use.
+2. **Orchestrator + satellites.** The anticipated Ventuno Q (more powerful than the UNO Q) acts as the n8n orchestrator driving multiple satellite UNO Qs over the LAN. One workflow reads a sensor from Q-A and actuates a motor on Q-B, selected by hostname.
+
+Neither scenario is supported by today's single-socket-same-host design.
+
+### 12.2 Architecture: WireGuard-mesh overlay + relay container
+
+The identity + transport layer is a **WireGuard-based mesh overlay**, with **Tailscale as the default implementation** — a deployment choice, not a lock-in. See §12.2.2 for alternatives we evaluated and their swap-out cost, and §12.5.2's "Swapping the overlay" for the mechanics. The rest of this section describes the default; anywhere the text says "Tailscale" or "`tailscaled`", read that as "the mesh-overlay client of your choice."
+
+Three pieces, landing together:
+
+1. **Bridge HAL refactor** — `Transport` interface in `packages/bridge/` with `UnixSocketTransport` (existing behaviour) and `TcpTransport` (new). Chosen automatically based on config shape. See §12.3.
+2. **`UnoQRouterApi` credentials in n8n** — each Q is a named n8n credential (transport + path *or* host+port). Nodes reference it by ID. Credential's Test Connection button runs a `$/version` round-trip. See §12.4.
+3. **Relay container** — a plain Docker service the user installs on each satellite Q via docker-compose. Bundles a TCP-to-unix-socket proxy (`socat`) and, in the production variant, `tailscaled` on top. Mounts `/var/run/arduino-router.sock` in, exposes the in-container loopback TCP port, and (with Tailscale) publishes it to the owner's tailnet via `tailscale serve`. See §12.5. **This is not an App Lab "Brick"** in the Arduino sense — it's a manual containerised deployment. See §12.5.3 for notes on possible future Brick packaging.
+
+**Network flow:**
+
+```
+[n8n host (PC or Ventuno Q)]                       [UNO Q satellite]
+  n8n                                                 arduino-router
+    │                                                       ▲
+    │ msgpack-rpc over TCP                                  │ unix socket (/var/run/arduino-router.sock)
+    ▼                                                       │
+  bridge (TcpTransport)                                     │
+    │                                                       │
+    ▼                                                       │
+  tailscale0  ── WireGuard (P2P, end-to-end) ──► tailscale0 │
+                                                   │        │
+                                                   ▼        │
+                                          Relay container   │
+                                            ├─ tailscaled   │
+                                            └─ socat TCP-LISTEN:<port>,fork
+                                               UNIX-CONNECT:/var/run/arduino-router.sock ─┘
+```
+
+**Key property:** `arduino-router` itself doesn't change. It keeps its `--unix-port`-only configuration from §3. The relay container is a userspace socket proxy the owner opts into. Uninstalling it returns the Q to today's attack surface exactly.
+
+**Integration with n8n is a no-op.** Tailscale operates at the IP/WireGuard layer, transparent to the application stack. n8n sees a hostname and a port, opens a TCP connection, writes bytes — same primitives it uses for a LAN peer. No n8n plugin for Tailscale, no OAuth flow inside n8n, no custom transport inside n8n-workflow. The only n8n-side change is ours: accepting a host/port in the credential.
+
+### 12.2.1 What was considered and rejected
+
+The following alternatives were evaluated during design and rejected. Don't relitigate without new information.
+
+- **Flip `arduino-router`'s `--listen-port` flag.** Research showed the router has a built-in TCP listener (`-l / --listen-port`) that serves the same RPC surface as the unix socket, through the same `router.Accept(conn)` loop. No TLS, no handshake, no auth — a `grep` for `TLS|Authorization|token|authenticate` across the repo returns zero matches. Enabling it unprotected is equivalent to publishing the MCU's full method set to the LAN. Securing it via interface-binding or firewall rules is fragile, misconfigurable, and exposes the router to misconfiguration bugs. The relay container sidesteps this entirely — router stays on its unix socket.
+- **DIY PKI with shared secrets or our own CA.** Rejected as reinventing identity infrastructure. Tailscale already solves enrollment, key rotation, ACLs, and NAT traversal — piggy-backing it is strictly better than writing those correctly ourselves.
+- **Arduino Cloud-issued X.509 via `arduino-cloud-cli`.** Would require Arduino to extend manual-device provisioning for a "mesh peer" role *and* add `--tls-cert` / `--tls-client-ca` to arduino-router. No roadmap commitment exists (§12.6). Needs upstream cooperation to be real; blocked.
+- **MQTT / NATS broker architecture.** A broker on the orchestrator, satellites publish/subscribe. n8n has mature MQTT nodes, so protocol-wise it would work. Rejected because it reshapes our node design around pub/sub semantics, loses the direct-RPC idiom our nodes are built around today, and adds a broker to operate. Bigger refactor, weaker ergonomics.
+- **SSH reverse tunnels in production.** Great for dev (already documented in CLAUDE.md), too fragile for production. Tunnels die, need supervision, bake SSH creds into hosts, don't model per-device ACLs.
+- **Python proxy on each Q re-exposing the router.** Same objection as the rejected design in §2. Unnecessary hop, unnecessary second language, unnecessary container.
+- **Mock router for multi-Q dev.** Earlier section suggested a local mock; rejected here because the existing SSH-tunneled integration tests already exercise real hardware with essentially the same setup cost. Testing on real HW is winner — a mock would add maintenance without adding realism.
+- **Relay as a host-level service (systemd unit or bare binary).** Works but means the user has to install packages directly on the Q. Containerising it keeps the install surface uniform (the user already has `docker compose` in their workflow for n8n itself), makes uninstall clean (`docker compose down && rm -rf ...`), and leaves the Q's base image untouched. Also keeps the door open to eventually packaging as an Arduino App Lab Brick (§12.5.3) without reshaping the deliverable.
+
+### 12.2.2 Overlay implementation — Tailscale default, alternatives in scope
+
+The §12.2 architecture commits to a WireGuard-based mesh overlay as the identity+transport layer. This subsection captures the alternatives we evaluated for that slot, why Tailscale is the default, and what we'd switch to under what conditions.
+
+**Why a WireGuard-based mesh VPN rather than an application-layer zero-trust overlay?** For our case, identity verification happens at **credential-selection time** in the n8n UI ("which Q does this node target?"), not at runtime inside a workflow. Once a user has picked "Kitchen Q" as the credential, the bridge just opens a TCP socket — no per-request identity check is needed. A mesh VPN authenticates at the network layer (no valid peer key → no route), which is exactly enough for this model. Application-layer zero-trust adds value only when each call needs its own identity assertion — which we don't.
+
+**The mesh-VPN family (the actual candidates for the default slot):**
+
+- **Tailscale** — *current default*. Hosted control plane (Tailscale Inc., free personal tier), native multi-OS clients, smallest ops surface. Mature, widely deployed, well-documented enrollment UX. We pay a dependency on Tailscale's coordination server (data stays P2P) and require users to create a Tailscale account.
+- **Headscale** — self-hosted, OSS drop-in for Tailscale's coordination server. **Uses the same Tailscale client**; the only relay-side change is pointing `tailscaled` at a custom coordination URL via `TS_LOGIN_SERVER=https://headscale.example.com`. Effort to swap: environment variable. Best choice if the hosted control plane is a blocker but the Tailscale client UX is desired.
+- **NetBird** — fully OSS WireGuard-mesh: both client and control plane are open source; self-hosted or their SaaS. Own client (still WireGuard under the hood), setup-key-based enrollment. Effort to swap: replace base image and entrypoint. Bonus: REST API for peer state, which makes "is peer X online and authorised?" queryable from an n8n HTTP Request node if we ever want that visibility inside a workflow.
+- **Netmaker** — self-hosted, IoT-oriented. Client can be their `netclient` agent OR a plain WireGuard configuration file. Standard WireGuard configs mean that if Arduino ever ships a WireGuard stack on the MCU or the Q's kernel directly, the MCU / host could join the same mesh natively — no relay container needed. Effort to swap: replace base image and entrypoint.
+- **ZeroTier** — virtual L2 network (different model from WireGuard's L3). Own client, mature, self-hostable control plane. Effort to swap: replace base image and entrypoint; n8n-side hostname/IP semantics also differ. Included for completeness; no clear win over Tailscale for our topology.
+- **Nebula** — certificate-first, you run lighthouses and manage a CA. Effort to swap: replace the entire overlay stack and commit to a CA management story. Strong audit story but operationally heavy for our scale.
+
+**OpenZiti — considered and deferred, not rejected.** OpenZiti is the strongest contender in the identity-first / zero-trust category: it has an official Node.js SDK (`@openziti/ziti-sdk-nodejs`), CA auto-enrollment for mass provisioning, and "dark service" semantics where services are addressed by name instead of hostname. Deferred for v1 because:
+
+- **Transport mismatch.** The SDK's main ergonomic is `ziti.httpRequest(...)`. Our bridge speaks raw msgpack-rpc over a streaming TCP connection — reachable through OpenZiti's lower-level `dial()` primitives, but we'd be wrapping a native-binary npm module around our existing socket code just to replace the socket.
+- **Identity model mismatch.** OpenZiti shines when application code needs per-request identity assertion inline. Our identity verification happens at credential-selection time in the n8n UI, once. Paying for a richer mechanism we don't exercise is cost without benefit.
+- **Distribution cost for n8n community nodes.** `@openziti/ziti-sdk-nodejs` ships a native binary downloaded during `npm install`, per OS/architecture. This is operationally painful for an n8n community-nodes package: per-arch prebuilds, install failures on constrained hosts, `NODE_FUNCTION_ALLOW_EXTERNAL` gating on restricted n8n deployments.
+
+**Revisit OpenZiti if** an n8n workflow ever needs to assert "the tool caller is really Q-123 right now" as part of a Method guard or similar runtime check. That is OpenZiti's sweet spot and it would earn its cost there.
+
+**Why Tailscale for v1 specifically:**
+
+1. Zero ops on our side — we don't run a control plane.
+2. Native clients mean the n8n-host half is a one-line `brew install` / MSI / apt step for the user, not another container to operate.
+3. The relay container's `tailscaled` is the one piece of the stack that's easiest to swap later (§12.5.2), so this is a reversible default.
+
+**Switch triggers:**
+
+- **Fully self-hosted, no external SaaS.** Swap to Headscale (env var change) or NetBird (image swap).
+- **MCU-direct mesh membership.** Swap to Netmaker (standard WireGuard configs that MCU stacks might one day speak) or, if we tolerate heavy ops, Nebula.
+- **Per-call runtime identity assertion.** Change category — OpenZiti.
+
+None of these is a v1 need. Document the escape hatches (§12.5.2), don't build them speculatively.
+
+### 12.3 Bridge HAL refactor
+
+**Goal:** swap the transport under `Bridge` without touching the RPC state machine, msgid allocation, timeout handling, `callWithOptions` retry logic, `provide` / `onNotify` bookkeeping, or the error hierarchy. All protocol behaviour stays in `bridge.ts`; the network layer becomes pluggable.
+
+**Shape (new files under `packages/bridge/src/transport/`):**
+
+```ts
+// transport/transport.ts
+export interface Transport {
+  connect(): Promise<void>;
+  write(bytes: Uint8Array): boolean;
+  close(): void;
+  on(event: 'data',  listener: (bytes: Uint8Array) => void): this;
+  on(event: 'close', listener: (err?: Error) => void): this;
+  on(event: 'error', listener: (err: Error) => void): this;
+  // (narrow EventEmitter subset; exact shape TBD during implementation.)
+}
+
+// transport/unix-socket.ts
+export class UnixSocketTransport implements Transport {
+  constructor(opts: { socketPath: string }) { /* existing net.createConnection(path) logic */ }
+}
+
+// transport/tcp.ts  (new)
+export class TcpTransport implements Transport {
+  constructor(opts: { host: string; port: number }) { /* net.createConnection({ host, port }) */ }
+}
+```
+
+**Bridge construction:**
+
+```ts
+// bridge.ts — updated signature
+static async connect(opts: {
+  // Legacy: preserved for backwards compatibility, equivalent to transport: { kind: 'unix', path: socket }.
+  socket?: string;
+  // New: explicit transport descriptor.
+  transport?:
+    | { kind: 'unix'; path: string }
+    | { kind: 'tcp'; host: string; port: number };
+  reconnect?: ReconnectOptions;
+}): Promise<Bridge> { … }
+```
+
+**Backwards compatibility:** existing `{ socket: '/var/run/arduino-router.sock' }` callers continue to work unchanged. Internally resolved to `{ transport: { kind: 'unix', path: socket } }`. No behaviour change for the existing unit or integration tests.
+
+**Reconnect semantics are transport's business, not Bridge's.** Both `UnixSocketTransport` and `TcpTransport` handle their own low-level reconnection signals (ECONNRESET, ECONNREFUSED, ETIMEDOUT on TCP; equivalent on unix). The exponential-backoff and subscription-replay logic stays in `Bridge` exactly as today — it listens for `close` and `error` events from whatever transport it holds.
+
+**No change to:** codec, msgid allocation, `callWithOptions`, `provide`, `onNotify`, `MockRouter`, error hierarchy, debug logging. The existing unit suite must pass unchanged after the refactor.
+
+**Integration tests:** add a TCP variant gated on `UNOQ_TCP_HOST` + `UNOQ_TCP_PORT` env vars. Same assertions as the existing unix-socket integration suite (§9); only the transport changes. Development execution path: run the socat-only relay container from §12.7 step 1 on the Q and SSH-forward its TCP port to the PC (`ssh -L 5775:localhost:5775 arduino@linucs.local`) — this gives the bridge a stable TCP target without touching `arduino-router`'s systemd unit and without requiring Tailscale to be set up. The Tailscale layer in step 3 just changes the host the bridge connects to, so once the integration suite is green over SSH-forwarded TCP it stays green over tailnet TCP.
+
+**MockRouter:** its transport input is already abstract-ish. Make it fully transport-agnostic by having unit tests construct a Bridge with a `MockTransport` that directly emits bytes, removing any `net.Socket` assumptions that crept in.
+
+### 12.4 n8n Credentials type — `UnoQRouterApi`
+
+**Why now** (vs. §6.5 deferral): §6.5 explicitly listed "TCP support lands" and "multi-Q deployments" as the v2 triggers. Both land here. Credentials become necessary, not decorative.
+
+**Schema (`packages/n8n-nodes/src/credentials/UnoQRouterApi.credentials.ts`):**
+
+```ts
+export class UnoQRouterApi implements ICredentialType {
+  name = 'unoQRouterApi';
+  displayName = 'Arduino UNO Q Router';
+  documentationUrl = 'https://github.com/raasimpact/n8n-uno-q/tree/main/packages/n8n-nodes#credentials';
+  properties: INodeProperties[] = [
+    {
+      displayName: 'Transport', name: 'transport', type: 'options',
+      options: [
+        { name: 'Unix Socket (local)',                   value: 'unix' },
+        { name: 'TCP (remote — relay container, etc.)',  value: 'tcp'  },
+      ],
+      default: 'unix',
+    },
+    {
+      displayName: 'Socket Path', name: 'socketPath', type: 'string',
+      default: '/var/run/arduino-router.sock',
+      displayOptions: { show: { transport: ['unix'] } },
+    },
+    {
+      displayName: 'Host', name: 'host', type: 'string',
+      placeholder: 'uno-q-kitchen.tailnet-abc.ts.net',
+      displayOptions: { show: { transport: ['tcp'] } },
+    },
+    {
+      displayName: 'Port', name: 'port', type: 'number',
+      default: 5775,
+      displayOptions: { show: { transport: ['tcp'] } },
+    },
+  ];
+  // test = custom generic test — see below.
+}
+```
+
+**Test Connection:** n8n's credential test infrastructure expects either an HTTP request (not applicable — msgpack-rpc isn't HTTP) or a custom generic `test` function. Use the latter: construct a Bridge with the credential's transport, call `$/version`, close, return the router's version string on success or a friendly error message on failure (socket not found, connection refused, timeout, tailnet peer unreachable). Total round-trip should be sub-second on a healthy network.
+
+**Node changes** (all four: `UnoQCall`, `UnoQTrigger`, `UnoQRespond`, `UnoQTool`):
+
+- Declare `credentials: [{ name: 'unoQRouterApi', required: true }]`.
+- Remove the per-node `socketPath` parameter from the Advanced Options tab. For one release cycle, keep reading the old parameter as a fallback if a node has no credential assigned; emit a deprecation warning to the n8n log. Then drop the fallback in the following release.
+- Resolve the credential at execute/activate time, pass its transport descriptor into `BridgeManager`.
+
+**BridgeManager keying change** ([packages/n8n-nodes/src/BridgeManager.ts](packages/n8n-nodes/src/BridgeManager.ts)): today keyed by socket path. Update the key to a canonical connection descriptor — `unix:/var/run/arduino-router.sock` or `tcp:uno-q-kitchen.tailnet-abc.ts.net:5775` — so multiple Qs in the same workflow get multiple Bridge singletons, one per credential. The `globalThis[Symbol.for(...)]` escape hatch from §7 still applies — unchanged. All of `BridgeManager`'s refcounting, provide/notify dedup, and lifecycle draining logic from §6.3 continues to work per-credential-key, not globally.
+
+**Rate-limiter key update** ([packages/n8n-nodes/src/rateLimiter.ts](packages/n8n-nodes/src/rateLimiter.ts), see §6.4): current key is `${node.id}:${method}`. With multi-Q, a single node could in principle be re-pointed at a different Q via credential edit; for that (rare) case, extending the key to `${node.id}:${method}:${credentialId}` keeps history clean across re-pointing. Low-priority; decide during implementation whether to ship now or defer.
+
+**Workflow portability:** the credential resource means the same workflow JSON runs on a dev laptop (credential → unix, `/tmp/arduino-router.sock`), on the Q itself (credential → unix, `/var/run/arduino-router.sock`), and against a remote Q (credential → tcp, tailnet hostname) with only the credential's values changing. No workflow edits per environment.
+
+**Multi-Q example:** define two credentials, `Kitchen Q` and `Garage Q`. A workflow that reads a temperature sensor on the kitchen and fires a fan relay on the garage is two Call nodes, one per credential, with no other coordination.
+
+### 12.5 Relay container
+
+**Role:** exposes `arduino-router`'s unix socket as a TCP endpoint, optionally wrapped in a Tailscale overlay. Runs on each satellite Q. Installed by the user via `docker compose`, same muscle memory as the n8n container. If not installed, the Q stays exactly as it is today — router reachable only via the local unix socket.
+
+**Lives under [deploy/relay/](deploy/relay/)** (to be created) alongside the existing `deploy/docker-compose.yml`.
+
+**Two variants, developed sequentially** (§12.7):
+
+- **Variant A — socat-only.** Minimal image: `alpine` + `socat`. Exposes the router's unix socket as a TCP listener bound to an arbitrary interface (loopback, LAN, or anything). No auth, no identity, nothing but byte-pumping. **Useful on its own** for a trusted-LAN setup and as the target the bridge HAL + credentials (§12.7 step 2) are developed against.
+- **Variant B — socat + Tailscale.** Adds `tailscaled` on top, so the TCP endpoint is reachable only from devices in the owner's tailnet. This is the production shape for untrusted networks. Everything except the enrollment UX and the network-layer transport is identical to Variant A.
+
+#### 12.5.1 Variant A — socat-only (step 1 deliverable)
+
+**Dockerfile (conceptual):**
+
+```dockerfile
+FROM alpine:3                                # minimal, already has docker first-party support on ARM64
+RUN apk add --no-cache socat
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]
+```
+
+**Entrypoint** — a one-liner, essentially:
+
+```sh
+#!/bin/sh
+exec socat TCP-LISTEN:${INTERNAL_PORT:-5775},reuseaddr,fork UNIX-CONNECT:/var/run/arduino-router.sock
+```
+
+The `fork` option on socat gives one child process per incoming TCP connection, each mapping 1:1 to a fresh unix-socket connection to `arduino-router`. The router already supports multiple concurrent clients on its unix socket (§3), so no serialisation is required. socat itself is PID 1 — if it dies, the container exits and the restart policy takes over.
+
+**docker-compose fragment (conceptual):**
+
+```yaml
+unoq-relay:
+  image: ghcr.io/raasimpact/unoq-relay:latest        # built from deploy/relay/
+  restart: unless-stopped
+  ports:
+    - "127.0.0.1:5775:5775"                          # bind to loopback by default; override for LAN
+  volumes:
+    - /var/run/arduino-router.sock:/var/run/arduino-router.sock:rw
+  # environment:
+  #   INTERNAL_PORT: 5775                            # default
+```
+
+**Intended test rig for steps 1–2:**
+
+1. User deploys the socat-only container alongside the existing n8n container on the Q (same `docker compose up -d`).
+2. From the PC, `ssh -L 5775:localhost:5775 arduino@linucs.local` forwards the Q's loopback port to the PC's loopback — same idiom as the existing unix-socket tunnel, just over TCP.
+3. `UNOQ_TCP_HOST=127.0.0.1 UNOQ_TCP_PORT=5775 npm run test:integration -w packages/bridge` exercises the TCP transport end-to-end against the real Q.
+4. Local n8n (dev) can target the same loopback with a `UnoQRouterApi` credential (transport=tcp, host=127.0.0.1, port=5775).
+
+This is the whole dev loop for the bridge HAL + credentials work. No Tailscale involved yet.
+
+#### 12.5.2 Variant B — socat + Tailscale (step 3 deliverable)
+
+**Dockerfile (conceptual):** build on Variant A's entrypoint, swap the base image for Tailscale's, add the tailscaled bootstrap.
+
+```dockerfile
+FROM tailscale/tailscale:latest              # official, Alpine-based, maintained upstream
+RUN apk add --no-cache socat
+COPY entrypoint.sh /entrypoint.sh            # extended version — see below
+RUN chmod +x /entrypoint.sh
+ENV TS_STATE_DIR=/var/lib/tailscale
+VOLUME ["/var/lib/tailscale"]
+ENTRYPOINT ["/entrypoint.sh"]
+```
+
+**Entrypoint responsibilities (in order):**
+
+1. Start `tailscaled` as a background process, wait for its local API socket to come up.
+2. If not already authenticated (state dir empty), run `tailscale up --authkey=${TS_AUTHKEY} --hostname=${TS_HOSTNAME}` to join the tailnet.
+3. Configure `tailscale serve --bg --tcp ${TS_PORT:-5775} tcp://127.0.0.1:${INTERNAL_PORT:-5775}` so the tailnet-facing port forwards into the container's loopback.
+4. `exec socat TCP-LISTEN:${INTERNAL_PORT:-5775},reuseaddr,fork UNIX-CONNECT:/var/run/arduino-router.sock` — the same PID 1 as Variant A.
+
+**docker-compose fragment (conceptual):**
+
+```yaml
+unoq-relay:
+  image: ghcr.io/raasimpact/unoq-relay-tailscale:latest   # built from deploy/relay/ with a -tailscale build target
+  restart: unless-stopped
+  network_mode: host                                       # simplest path to WireGuard tun + loopback
+  cap_add:
+    - NET_ADMIN
+    - NET_RAW
+  devices:
+    - /dev/net/tun
+  volumes:
+    - /var/run/arduino-router.sock:/var/run/arduino-router.sock:rw
+    - tailscale-state:/var/lib/tailscale
+  environment:
+    TS_AUTHKEY: ${TS_AUTHKEY:?set in .env or pass at run time}
+    TS_HOSTNAME: ${TS_HOSTNAME:-uno-q}                     # appears in Tailscale admin + as DNS name in the tailnet
+    # TS_PORT / INTERNAL_PORT default to 5775.
+volumes:
+  tailscale-state:                                          # persists device identity — auth key reused only on first boot
+```
+
+**Why `network_mode: host`:** simplest path to (a) give Tailscale's WireGuard driver access to `/dev/net/tun` and userspace routing, and (b) let `socat` still be reachable via loopback for `tailscale serve`. Userspace-networking mode (`TS_USERSPACE=1`) is a fallback if the Q's Docker rejects `NET_ADMIN` or `/dev/net/tun` — worth validating empirically during implementation (§12.8).
+
+**Enrollment UX:**
+
+1. User creates a reusable or (preferred) single-use auth key in the Tailscale admin console, tagged `tag:unoq` so tailnet ACLs can target satellites specifically.
+2. User pastes it into the relay container's `.env` file (`TS_AUTHKEY=tskey-auth-...`).
+3. `docker compose up -d` boots the relay; `tailscaled` joins the tailnet, advertises the Q at `${TS_HOSTNAME}.${tailnet}.ts.net`.
+4. User defines a `UnoQRouterApi` credential in n8n with transport=tcp, host=that hostname, port=5775.
+5. Any node referencing that credential can now call MCU methods on that Q.
+
+**Host-side prerequisites on the n8n machine** (not the Q):
+
+- Tailscale installed and enrolled in the same tailnet. Native Tailscale app on macOS / Windows / Linux for dev; the same relay container image (or a standalone `tailscaled`) on the Ventuno Q orchestrator in prod.
+- No n8n configuration changes needed. No plugin, no n8n-side Tailscale integration — the tailnet is transparent at the network layer.
+
+**Swapping the overlay.** The Tailscale-specific half of the container is isolated to the base image and the entrypoint's enrollment + serve logic. The socat half, the bind-mount, `/var/run/arduino-router.sock`, our bridge, and the n8n credential schema are all overlay-agnostic. Concretely, to swap Tailscale for another WireGuard-mesh overlay (see §12.2.2 for the candidates):
+
+- **Headscale** — *smallest possible change*. Keep `FROM tailscale/tailscale` and `tailscaled` exactly as-is. Set `TS_LOGIN_SERVER=https://headscale.example.com` in the compose `environment:` block and issue auth keys from your Headscale instance instead of the Tailscale admin console. No image rebuild.
+- **NetBird** — swap `FROM tailscale/tailscale` for `FROM netbirdio/netbird` (or equivalent), replace the `tailscale up` + `tailscale serve` calls in the entrypoint with NetBird's `netbird up --setup-key=...` + whatever exposes the container port to the overlay. The socat invocation at the end stays identical. Expected diff: ~20-30 lines in the Dockerfile + entrypoint.
+- **Netmaker / ZeroTier / Nebula** — same shape as NetBird (new base image, new enrollment in the entrypoint), with more ceremony around CA / cert management for Nebula.
+
+Nothing on the n8n side changes for any of these swaps — the credential still points at a hostname:port. The hostname format changes (`*.ts.net` → whatever the chosen overlay uses), which is a value in the credential, not a code change.
+
+We don't ship Variant B images for these alternatives in v1. Document the swap path for users who need it; build additional variants only if demand appears.
+
+#### 12.5.3 Future App Lab Brick packaging
+
+We know from §12.6 that Arduino's "Bricks" are mechanically Docker containers orchestrated by `arduino-app-cli`, but that third-party Bricks are not a supported category today — the Brick channel is Arduino-curated and there's no public spec, registry, or signing requirement. The relay container above is therefore **not** a Brick; it's a plain docker-compose service the user installs manually.
+
+If Arduino later opens the Brick channel to third-party contributions, this container is a natural candidate: it already matches the shape (image bundles everything, bind-mounts the router socket, long-running service). What would likely change:
+
+- **Installation UX** — from `docker compose up -d` + editing `.env` to an App Lab config form that takes `TS_AUTHKEY` and `TS_HOSTNAME` and materialises the compose entry into `arduino-app-cli`'s generated compose file.
+- **Image hosting** — possibly `ghcr.io/arduino/app-bricks/...` instead of our own GHCR org, depending on Arduino's policy.
+- **Default port / network-mode choices** — might need to conform to whatever conventions App Lab establishes.
+
+What would *not* change: the container contents (socat + tailscaled), the bridge and n8n side of the stack, or the security model. The relay stays the same relay; only the way a user acquires and configures it differs. So the effort is not wasted if Bricks never open up — and it's cleanly re-packageable if they do.
+
+### 12.5.4 Security model
+
+**Threat model:** the satellite Q sits on an untrusted or semi-trusted LAN. Possible attackers include other devices on the LAN, the user's ISP, public WiFi co-tenants, and (hypothetically) anyone who compromises a device legitimately on the user's tailnet.
+
+**Defenses:**
+
+- **Router attack surface is unchanged.** `arduino-router` still listens only on `/var/run/arduino-router.sock`. Nothing on the LAN can reach it. The relay container's `socat` listens inside the container's view of loopback (or host loopback under `network_mode: host`); either way, not reachable from any non-tailnet network path.
+- **Tailnet access is key-gated.** Every WireGuard packet is authenticated by the peer's public key. No valid key → no route → no connection attempt reaches the listener. Brute-forcing this is computationally infeasible.
+- **Per-device ACLs.** The Tailscale admin lets the owner constrain "only my laptop and my orchestrator Q may reach satellites tagged `tag:unoq`". A compromised unrelated tailnet device cannot touch the router.
+- **Transit encryption.** WireGuard, end-to-end. Tailscale's coordination server brokers initial key exchange but never sees data. DERP relays, when used as a P2P fallback, are end-to-end encrypted and opaque to Tailscale.
+
+**Out of scope for this layer:**
+
+- A compromised n8n host already legitimately on the tailnet. It can call any MCU method the router exposes. Mitigate at the Method node layer (guards, rate limits, HITL) — the existing §6.4 primitives stay the right answer for this.
+- A leaked Tailscale auth key exploited before first enrollment. Tailscale recommends single-use + short-TTL keys; the relay container's docs should say the same.
+- Physical access to the satellite Q. No network-layer solution addresses this.
+
+**What the model explicitly is *not*:** application-layer auth on top of msgpack-rpc. Authentication lives at the network layer, consistent with Tailscale's documented deployment patterns (internal DBs, SSH, dashboards are all commonly exposed behind tailnet membership alone). If a deployment's threat model requires defense-in-depth at the application layer, a pre-shared-key or token check can be added as a v2.1 feature — not required for v1.
+
+### 12.6 Verified findings about the Arduino ecosystem
+
+Captured here so they don't have to be re-researched. All verified against `arduino/arduino-router` source on `main` as of 2026-04-21, the `linucs.local` UNO Q, and public Arduino documentation.
+
+- **`arduino-router` has a TCP listener, but it's off by default.** The `-l / --listen-port` flag wires up a `net.Listen("tcp", addr)` whose accepted connections feed the same `router.Accept(conn)` loop as the unix-socket listener — identical help string ("Listening port for RPC services"), identical method surface (`networkapi`, `hciapi`, `$/serial/*`, `$/version`), no transport-conditional logic anywhere. A TCP client gets the full RPC surface, including `$/serial/open` into the MCU. The shipped systemd unit on the UNO Q uses only `--unix-port` and `--serial-port`. No TLS, no handshake, no auth: `grep` across the repo for `TLS|Authorization|token|authenticate` returns zero matches. The router's trust model is "root on this box owns the socket"; that does not extend over TCP.
+- **No secure element on the UNO Q.** MCU is STM32U585 (on-die HUK/PKA/SAES/TRNG, but Arduino does not visibly use them for device identity). MPU is Qualcomm QRB2210 (TrustZone exists in silicon, but no OP-TEE supplicant, no `/dev/tee*`, no `/dev/tpm*`, no `/dev/qseecom*` exposed to Linux). No ATECC608 on any I²C bus. `/etc/arduino*` and `/var/lib/arduino*` contain no factory-provisioned certificate or key.
+- **UNO Q registers as a "manual device" in Arduino Cloud.** It receives a `device_id` + `secret_key` pair, not an X.509 certificate — contrast with MKR / Opta / Portenta, which carry factory-provisioned client certs in an ATECC608. The UNO Q's own persistent hardware identity, visible to userspace, is the Qualcomm qfprom serial under `/sys/devices/soc0/serial_number`.
+- **"Bricks" are Docker containers orchestrated by `arduino-app-cli`.** No published manifest format, no signing requirement, no registry, no third-party brick channel. `arduino-app-cli daemon` on the Q exposes an unauthenticated localhost REST API for app/brick management. A "brick" shipped by us is, mechanically, a docker-compose service the user opts into.
+- **mDNS identity on the LAN.** The Q advertises `_arduino._tcp` on port 80 with a TXT record containing `serial_number=<qfprom>`, `vid=0x2341`, `pid=0x0078`, `auth_upload=yes`. The "auth" is `arduino-create-agent`'s signed-command pattern (Arduino's public key embedded in config; no TLS). Usable as an identifier, not as an authenticator.
+- **All Arduino auth precedents are device → cloud outbound mTLS** (MKR/Opta/Portenta via ATECC608 + Arduino Cloud CA; Portenta X8 via Foundries.io). None of them authenticate a peer → device LAN connection. Our use case has no direct precedent inside the Arduino ecosystem — one reason we chose an external network-layer overlay rather than inventing new device-side identity primitives.
+
+**Implication for design:** Arduino has no ready-to-use identity primitive we can piggy-back on for mutual device-to-device authentication. Any such primitive we build would be ours alone. Choosing Tailscale pushes the identity problem onto infrastructure designed for exactly this, rather than inventing a small-footprint version of it.
+
+### 12.7 Implementation order
+
+Target sequence for landing on `feat/multi-q`. Each step should be independently reviewable and leave the tree green. The order is deliberately **socat container first → bridge + n8n against it → Tailscale layered on top**, because it isolates each concern:
+
+- Step 1 validates the socket-proxy approach in isolation, before any bridge changes exist.
+- Step 2 develops the bridge HAL + credentials against a stable TCP target on a trusted LAN — no networking overlay in the picture.
+- Step 3 adds Tailscale last, and only changes the hostname the credential points at. If the bridge works over LAN TCP (step 2), Tailscale is a pure overlay that can't break the RPC layer.
+
+Each step is also shippable on its own — a release containing only steps 1–3 is already useful to anyone operating a trusted LAN and doesn't force Tailscale onto them.
+
+1. **Variant A relay container — socat only** (§12.5.1). Build the minimal image under [deploy/relay/](deploy/relay/), `docker compose up -d` alongside the existing n8n container on the Q. Test by hand: SSH-forward the TCP port to the PC, run a one-shot msgpack-rpc script against it (e.g. an adapted [experiments/test-router.mjs](experiments/test-router.mjs) pointed at TCP) and confirm `$/version` round-trips. **Deliverable:** a published image (`ghcr.io/raasimpact/unoq-relay`) and a compose fragment. Usable on its own by anyone with a trusted LAN.
+2. **Bridge HAL refactor** (§12.3). Extract `Transport` interface, migrate unix-socket logic into `UnixSocketTransport`, add `TcpTransport`. Preserve existing `Bridge.connect({ socket })` shape via an internal adapter. Unit tests green on both transports using a transport-agnostic `MockTransport`. TCP integration tests gated on `UNOQ_TCP_HOST` / `UNOQ_TCP_PORT`, pointed at step 1's relay container via the SSH-forward.
+3. **`UnoQRouterApi` credentials + node wiring** (§12.4). Credential class with `test` function, node `credentials:` declaration on all four nodes, `BridgeManager` keying change, rate-limiter key update. Backwards-compat shim for inline `socketPath` with a deprecation warning. Validate end-to-end by running n8n on the PC with a credential pointing at step 1's container (transport=tcp, host=127.0.0.1 via SSH-forward) and exercising every node type — Call, Trigger (both modes), Respond, Method.
+4. **Variant B relay container — add Tailscale** (§12.5.2). Extend the step-1 image to `FROM tailscale/tailscale`, wire `tailscaled` + `tailscale serve` into the entrypoint, add the production compose fragment with `NET_ADMIN` / `/dev/net/tun` / state volume. Smoke-test: enrol one Q in a tailnet, change the n8n credential's host from loopback to `uno-q.tailnet-abc.ts.net`, confirm the same workflow keeps working end-to-end. **The transport from n8n's perspective does not change** — it's still a TCP connection to a hostname. Everything validated in step 3 continues to work; only the route the packets take differs.
+5. **Docs + examples**. Top-level README "Multi-Q setup" section covering both variants (trusted-LAN with Variant A, untrusted networks with Variant B), update to [CLAUDE.md § Dev loop / Troubleshooting](CLAUDE.md) for the relay container's role and new failure modes (container stopped, tailnet disconnected, auth key expired), example workflow under `examples/multi-q/` referencing two credentials.
+
+### 12.8 Open items
+
+- **Arduino's roadmap for `--listen-port` auth.** File a question on `arduino/arduino-router` asking whether the TCP listener is a supported production interface and whether TLS / client-cert auth is on the roadmap. If yes, there may eventually be a simpler v2.1 path that drops the relay container in favour of the router's native TLS — unlikely near-term, worth on record. Draft of the question lives in the `feat/multi-q` thread history.
+- **Relay container on the Q's actual Docker runtime.** Validate empirically that `network_mode: host` + `cap_add: [NET_ADMIN, NET_RAW]` + `/dev/net/tun` are accepted for Variant B. If not, fall back to `TS_USERSPACE=1` (userspace WireGuard, slower but fewer host requirements). Variant A has no such requirements and should run on any Docker.
+- **Ventuno Q availability.** If/when the Ventuno Q ships, re-verify the relay container runs on its hardware (same Docker stack expected) and that the orchestrator side works too (likely runs a native `tailscaled` on the host rather than the relay container, but worth confirming; the orchestrator doesn't need the socat half because its own arduino-router is local).
+- **Multiple-Q authoring UX.** Once credentials land, check the node-picker and credential dropdown don't feel clunky with 5+ credentials defined. Possibly worth interpolating credential name into node display when a credential is bound, so canvas reads "Kitchen Q · Call" rather than just "Call".
+- **Queue-mode incompatibility still stands.** Multi-Q does nothing to fix it (§6 singleton-client note remains). Flag in docs; both the singleton and the rate limiter remain per-process.
+- **Auth key rotation UX.** What happens when a Tailscale auth key expires and the relay container restarts? The state volume persists the node identity, so normal restarts don't re-auth. A full device-key rotation flow is a Tailscale admin action and out of scope — but the relay container's docs should point at it.
+
+### 12.9 Related sections
+
+- §2 — Architecture decision (direct to router, no Python proxy). Multi-Q keeps this invariant: no extra language, no extra process on the Q other than the relay container (which is a userspace socket proxy, not an RPC translator).
+- §5 — Bridge package API. §12.3 is a refactor *under* this API; the public shape gains a `transport:` option but stays backwards-compatible.
+- §6.3 — BridgeManager singleton and refcount. §12.4's keying change (socket path → canonical connection descriptor) is a local change inside BridgeManager, not a contract change.
+- §6.4 — Method node guards and rate limits. These remain the application-layer defense for compromised tailnet peers (§12.5.1).
+- §6.5 — "Credentials deferred to v2". Superseded here; see cross-reference at the top of that section.
+- §8 — Open items. Multi-Q-specific opens live here in §12.8; §8 stays focused on v1 hardware verification items.
