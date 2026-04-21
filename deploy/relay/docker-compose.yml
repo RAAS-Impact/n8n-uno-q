@@ -1,0 +1,14 @@
+services:
+  unoq-relay:
+    build: .
+    image: ghcr.io/raasimpact/unoq-relay:latest
+    restart: unless-stopped
+    ports:
+      # Bind to loopback by default. Override to 0.0.0.0:5775 (or a specific
+      # LAN IP) for trusted-LAN setups, or leave on loopback when Tailscale
+      # fronts the service (Variant B, CONTEXT.md §12.5.2).
+      - "127.0.0.1:${UNOQ_RELAY_PORT:-5775}:5775"
+    volumes:
+      - /var/run/arduino-router.sock:/var/run/arduino-router.sock:rw
+    # environment:
+    #   INTERNAL_PORT: 5775
