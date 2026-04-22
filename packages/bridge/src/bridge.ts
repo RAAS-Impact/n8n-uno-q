@@ -2,7 +2,9 @@
  * bridge.ts — The main Bridge client class.
  *
  * This is the core of the package: a persistent, bidirectional MessagePack-RPC
- * client that talks to the arduino-router over a Unix socket.
+ * client that talks to the arduino-router. The network is pluggable via the
+ * Transport interface (unix socket, TCP, mock); the RPC state machine is
+ * independent of which one is in use.
  *
  * What it does that a simple one-shot script can't:
  *
@@ -16,13 +18,15 @@
  *
  * - **Resilient**: automatic reconnection with exponential backoff. On
  *   reconnect, re-registers all provided methods so the router knows we're
- *   still handling them.
+ *   still handling them. The backoff + replay loop lives here, not in the
+ *   Transport, so a single implementation covers every transport flavour.
  *
  * - **Lifecycle management**: timeouts on pending calls, graceful close,
  *   rejection of all in-flight promises on socket drop.
  */
 import { EventEmitter } from 'node:events';
-import { Transport } from './transport.js';
+import { createTransport, describeTransport } from './transport/index.js';
+import type { Transport, TransportDescriptor } from './transport/index.js';
 import { StreamDecoder, encodeRequest, encodeResponse, encodeNotify, MSG_REQUEST, MSG_RESPONSE, MSG_NOTIFY } from './codec.js';
 import type { RpcMessage } from './codec.js';
 import { TimeoutError, ConnectionError, BridgeError } from './errors.js';
@@ -40,13 +44,28 @@ export interface ReconnectOptions {
 }
 
 export interface ConnectOptions {
-  /** Path to the arduino-router Unix socket. Default: /var/run/arduino-router.sock */
+  /**
+   * Legacy shortcut for `transport: { kind: 'unix', path: ... }`. Preserved for
+   * backwards compatibility; prefer `transport` for new code.
+   * @deprecated Use `transport` instead.
+   */
   socket?: string;
+  /** Where this Bridge should connect. Defaults to the legacy unix socket path. */
+  transport?: TransportDescriptor;
   /** Reconnection behaviour. Enabled by default. */
   reconnect?: Partial<ReconnectOptions>;
+  /**
+   * Inject a pre-built Transport instance — used by tests (MockTransport) and
+   * by advanced callers who need a custom wire implementation. When supplied,
+   * `transport` and `socket` are ignored.
+   */
+  transportInstance?: Transport;
 }
 
-export type BridgeOptions = Required<ConnectOptions>;
+export interface BridgeOptions {
+  transport: TransportDescriptor;
+  reconnect: ReconnectOptions;
+}
 
 /**
  * Per-call options for `callWithOptions`. See CONTEXT.md §6.4 for the full
@@ -112,25 +131,28 @@ export class Bridge extends EventEmitter {
   private activeHandlers = new Set<Promise<void>>();
 
   private connected = false;
+  private closedByUs = false;
+  private reconnectAttempt = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-  /**
-   * True once the first connect has completed. The transport.on('connect')
-   * handler uses this to distinguish the initial connect (no re-registration,
-   * no 'reconnect' event) from subsequent reconnects. Tracking this
-   * explicitly is more robust than peeking at msgid — a fail-fast attempt
-   * may not bump msgid, leaving a stale "this is the first connect" reading.
-   */
-  private hasConnectedOnce = false;
-
-  private constructor(private readonly options: BridgeOptions) {
+  private constructor(
+    private readonly options: BridgeOptions,
+    transport: Transport,
+  ) {
     super();
-    this.transport = new Transport(options.socket, options.reconnect as ReconnectOptions);
+    this.transport = transport;
+    this.wireTransportEvents();
   }
 
   /** Connect to the router and return a ready-to-use Bridge instance. */
   static async connect(opts: ConnectOptions = {}): Promise<Bridge> {
+    // Resolve the transport descriptor: explicit `transport` wins, otherwise
+    // fall back to the legacy `socket` shortcut, otherwise default unix path.
+    const descriptor: TransportDescriptor =
+      opts.transport ?? { kind: 'unix', path: opts.socket ?? DEFAULT_SOCKET };
+
     const options: BridgeOptions = {
-      socket: opts.socket ?? DEFAULT_SOCKET,
+      transport: descriptor,
       reconnect: {
         enabled: opts.reconnect?.enabled ?? true,
         baseDelayMs: opts.reconnect?.baseDelayMs ?? 200,
@@ -138,64 +160,80 @@ export class Bridge extends EventEmitter {
       },
     };
 
-    const bridge = new Bridge(options);
-    await bridge.init();
+    const transport = opts.transportInstance ?? createTransport(descriptor);
+    const bridge = new Bridge(options, transport);
+    await bridge.initialConnect();
     return bridge;
   }
 
   /**
-   * Wire up transport events and establish the first connection.
-   * The returned promise resolves once the socket is connected.
+   * Register the long-lived Transport listeners that persist across
+   * reconnection attempts. Bridge re-uses the same Transport instance for
+   * every (re)connect, so these listeners only need to be attached once.
    */
-  private async init(): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
-      // Feed every socket chunk through the streaming decoder
-      this.transport.on('data', (chunk: Uint8Array) => this.onData(chunk));
+  private wireTransportEvents(): void {
+    this.transport.on('data', (chunk: Uint8Array) => this.onData(chunk));
+    this.transport.on('error', (err: Error) => this.emit('error', err));
+    this.transport.on('close', () => this.onTransportClose());
+  }
 
-      this.transport.on('connect', () => {
-        this.connected = true;
-        // First connect → flip the flag and stop. Subsequent connects are
-        // reconnections; re-register everything and emit 'reconnect'.
-        if (!this.hasConnectedOnce) {
-          this.hasConnectedOnce = true;
-          return;
-        }
-        debug('reconnect', 're-registering providers');
-        this.reRegister().then(() => this.emit('reconnect'));
-      });
+  /** Perform the first connection attempt — failure rejects the connect() Promise. */
+  private async initialConnect(): Promise<void> {
+    await this.transport.connect();
+    this.connected = true;
+    debug('connect', 'connected to', describeTransport(this.options.transport));
+  }
 
-      // On socket close, reject every pending call — the responses will never
-      // arrive. Also clear the in-flight provide handler tracking (those IIFEs
-      // keep running in the background, but their eventual RESPONSE bytes go
-      // nowhere — the original MCU msgid is unknown to any socket we reconnect
-      // to). Finally, emit a `disconnect` event so application-layer consumers
-      // (e.g. n8n's UnoQTrigger holding deferred PendingRequests entries) have
-      // a hook to clean up their own state instead of waiting for a RESPONSE
-      // that will never reach the original caller.
-      this.transport.on('close', () => {
-        this.connected = false;
-        for (const [id, req] of this.pending) {
-          clearTimeout(req.timer);
-          req.reject(new ConnectionError('Socket closed'));
-          this.pending.delete(id);
-        }
-        this.activeHandlers.clear();
-        this.emit('disconnect');
-      });
+  /**
+   * Fired each time the underlying socket closes. Cleans up per-connection
+   * state and — unless the user called close() — schedules a reconnect with
+   * exponential backoff. The subsequent reconnect attempt replays $/register
+   * for every provide()d method and onNotify()d subscription.
+   */
+  private onTransportClose(): void {
+    this.connected = false;
+    for (const [id, req] of this.pending) {
+      clearTimeout(req.timer);
+      req.reject(new ConnectionError('Socket closed'));
+      this.pending.delete(id);
+    }
+    this.activeHandlers.clear();
+    this.emit('disconnect');
 
-      this.transport.on('error', (err: Error) => {
-        this.emit('error', err);
-      });
+    if (this.options.reconnect.enabled && !this.closedByUs) {
+      this.scheduleReconnect();
+    }
+  }
 
-      // Wait for the first successful connection before resolving
-      this.transport.once('connect', () => {
-        debug('connect', 'connected to', this.options.socket);
-        this.connected = true;
-        resolve();
-      });
-      this.transport.once('error', (err: Error) => reject(err));
-      this.transport.connect();
-    });
+  private scheduleReconnect(): void {
+    if (this.reconnectTimer || this.closedByUs) return;
+    const delay = Math.min(
+      this.options.reconnect.baseDelayMs * 2 ** this.reconnectAttempt,
+      this.options.reconnect.maxDelayMs,
+    );
+    this.reconnectAttempt++;
+    debug('reconnect', `scheduled in ${delay}ms (attempt ${this.reconnectAttempt})`);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      void this.doReconnect();
+    }, delay);
+  }
+
+  private async doReconnect(): Promise<void> {
+    if (this.closedByUs) return;
+    try {
+      await this.transport.connect();
+      this.connected = true;
+      this.reconnectAttempt = 0;
+      debug('reconnect', 're-registering providers');
+      await this.reRegister();
+      this.emit('reconnect');
+    } catch (err) {
+      // Reconnect attempt failed (e.g. ECONNREFUSED). Surface via 'error'
+      // and schedule the next attempt — the backoff doubles until the cap.
+      this.emit('error', err as Error);
+      if (!this.closedByUs) this.scheduleReconnect();
+    }
   }
 
   /** Decode incoming bytes into RPC messages and dispatch each one. */
@@ -481,6 +519,11 @@ export class Bridge extends EventEmitter {
 
   /** Gracefully close the socket and clean up all listeners. */
   async close(): Promise<void> {
+    this.closedByUs = true;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     await this.transport.close();
     this.removeAllListeners();
   }

@@ -9,6 +9,14 @@ services:
       # fronts the service (Variant B, CONTEXT.md §12.5.2).
       - "127.0.0.1:${UNOQ_RELAY_PORT:-5775}:5775"
     volumes:
-      - /var/run/arduino-router.sock:/var/run/arduino-router.sock:rw
+      # Mount /var/run as a DIRECTORY, not the socket file directly. Docker
+      # file bind-mounts pin to the host inode at mount time — when arduino-
+      # router deletes and recreates /var/run/arduino-router.sock (every
+      # `systemctl restart arduino-router`), the container stays bound to the
+      # old orphan inode and every connect(2) fails. Directory mounts re-
+      # resolve the path on each access, so socat's per-connection dial sees
+      # the current socket file. Mounted under /host/var/run to keep the
+      # container's own /var/run untouched.
+      - /var/run:/host/var/run:rw
     # environment:
     #   INTERNAL_PORT: 5775

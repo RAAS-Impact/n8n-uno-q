@@ -6,5 +6,15 @@
  * from internal modules.
  */
 export { Bridge } from './bridge.js';
-export type { BridgeOptions, CallOptions, ConnectOptions, ReconnectOptions, ProvideHandler, NotifyHandler } from './bridge.js';
+export type {
+  BridgeOptions,
+  CallOptions,
+  ConnectOptions,
+  ReconnectOptions,
+  ProvideHandler,
+  NotifyHandler,
+} from './bridge.js';
 export { BridgeError, TimeoutError, ConnectionError, MethodNotAvailableError } from './errors.js';
+export type { Transport, TransportDescriptor } from './transport/index.js';
+export { describeTransport, createTransport, UnixSocketTransport, TcpTransport } from './transport/index.js';
+export type { UnixSocketTransportOptions, TcpTransportOptions } from './transport/index.js';

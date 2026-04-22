@@ -4,24 +4,32 @@
 // arduino-router`, so the socket actually drops during in-flight calls — the
 // one thing MockRouter unit tests can't prove.
 //
-// Usage:
-//   Prereq 1 — SSH tunnel open at /tmp/arduino-router.sock:
-//     rm -f /tmp/arduino-router.sock
-//     ssh -N -L /tmp/arduino-router.sock:/var/run/arduino-router.sock arduino@linucs.local
+// Covers both transports. Configure via env:
 //
-//   Prereq 2 — passwordless sudo on the Q for the restart command:
-//     ssh arduino@linucs.local
-//     sudo visudo -f /etc/sudoers.d/arduino-router
-//     # add this single line:
-//     arduino ALL=(root) NOPASSWD: /bin/systemctl restart arduino-router
+//   A. Unix socket (default) — SSH tunnel the router socket to the PC:
+//        rm -f /tmp/arduino-router.sock
+//        ssh -N -L /tmp/arduino-router.sock:/var/run/arduino-router.sock arduino@linucs.local
+//      Then:  node experiments/test-retry-live.mjs
+//      Override the default path with UNOQ_SOCKET.
 //
-//   Prereq 3 — bridge package built:
-//     npm run build -w packages/bridge
+//   B. TCP (Variant A relay container, CONTEXT.md §12.5.1):
+//      On the Q:  cd ~/n8n/relay && docker compose up -d
+//      On the PC: ssh -N -L 5775:localhost:5775 arduino@linucs.local
+//      Then:  UNOQ_TCP_HOST=127.0.0.1 UNOQ_TCP_PORT=5775 node experiments/test-retry-live.mjs
 //
-//   Then:
-//     node experiments/test-retry-live.mjs
+// Set both UNOQ_SOCKET and UNOQ_TCP_HOST+UNOQ_TCP_PORT to exercise both
+// transports back-to-back in a single run (useful for multi-Q refactor smoke).
 //
-// Env overrides: UNOQ_SOCKET, UNOQ_SSH.
+// Prereq (both transports): passwordless sudo on the Q for the restart cmd —
+//   ssh arduino@linucs.local
+//   sudo visudo -f /etc/sudoers.d/arduino-router
+//   # add this single line:
+//   arduino ALL=(root) NOPASSWD: /bin/systemctl restart arduino-router
+//
+// Prereq (both transports): bridge package built —
+//   npm run build -w packages/bridge
+//
+// Env overrides: UNOQ_SOCKET, UNOQ_TCP_HOST, UNOQ_TCP_PORT, UNOQ_SSH.
 
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -38,8 +46,81 @@ if (!existsSync(bridgeDist)) {
 }
 const { Bridge } = await import(bridgeDist);
 
-const SOCKET = process.env.UNOQ_SOCKET ?? '/tmp/arduino-router.sock';
 const SSH_HOST = process.env.UNOQ_SSH ?? 'arduino@linucs.local';
+
+// --- cases (transport configurations) -------------------------------------
+
+function probeUnix(socketPath) {
+  return new Promise((resolve) => {
+    const s = net.createConnection(socketPath);
+    const done = (ok) => {
+      s.removeAllListeners();
+      try { s.destroy(); } catch { /* ignore */ }
+      resolve(ok);
+    };
+    s.once('connect', () => done(true));
+    s.once('error', () => done(false));
+  });
+}
+
+function probeTcp(host, port) {
+  return new Promise((resolve) => {
+    const s = net.createConnection({ host, port });
+    const done = (ok) => {
+      s.removeAllListeners();
+      try { s.destroy(); } catch { /* ignore */ }
+      resolve(ok);
+    };
+    s.once('connect', () => done(true));
+    s.once('error', () => done(false));
+  });
+}
+
+const RECONNECT = { enabled: true, baseDelayMs: 200, maxDelayMs: 2000 };
+
+function makeUnixCase(socketPath) {
+  return {
+    name: 'unix',
+    label: socketPath,
+    opts: { socket: socketPath, reconnect: RECONNECT },
+    probe: () => probeUnix(socketPath),
+    reopenHint:
+      `rm -f ${socketPath}\n` +
+      `  ssh -N -L ${socketPath}:/var/run/arduino-router.sock ${SSH_HOST}`,
+  };
+}
+
+function makeTcpCase(host, port) {
+  return {
+    name: 'tcp',
+    label: `${host}:${port}`,
+    opts: { transport: { kind: 'tcp', host, port }, reconnect: RECONNECT },
+    probe: () => probeTcp(host, port),
+    reopenHint:
+      `On the Q:  cd ~/n8n/relay && docker compose up -d\n` +
+      `  On the PC: ssh -N -L ${port}:localhost:${port} ${SSH_HOST}`,
+  };
+}
+
+const cases = [];
+if (process.env.UNOQ_SOCKET) {
+  cases.push(makeUnixCase(process.env.UNOQ_SOCKET));
+} else if (!process.env.UNOQ_TCP_HOST) {
+  // Legacy default: no env vars set → unix at the canonical tunnel path.
+  cases.push(makeUnixCase('/tmp/arduino-router.sock'));
+}
+
+if (process.env.UNOQ_TCP_HOST && process.env.UNOQ_TCP_PORT) {
+  cases.push(makeTcpCase(process.env.UNOQ_TCP_HOST, Number(process.env.UNOQ_TCP_PORT)));
+}
+
+if (cases.length === 0) {
+  console.error(
+    'Invalid env: UNOQ_TCP_HOST set but UNOQ_TCP_PORT missing. ' +
+    'Set both, or set UNOQ_SOCKET, or run without env vars for the default unix path.',
+  );
+  process.exit(1);
+}
 
 // --- helpers --------------------------------------------------------------
 
@@ -59,24 +140,10 @@ function ssh(cmd) {
   });
 }
 
-function probeTunnel() {
-  // existsSync only tells us the socket file exists; it doesn't tell us SSH is
-  // still listening behind it. A stale socket file from a dead tunnel would
-  // pass existsSync but refuse connections — so actually connect and close.
-  return new Promise((resolve) => {
-    const s = net.createConnection(SOCKET);
-    const done = (ok) => {
-      s.removeAllListeners();
-      try {
-        s.destroy();
-      } catch {
-        /* ignore */
-      }
-      resolve(ok);
-    };
-    s.once('connect', () => done(true));
-    s.once('error', () => done(false));
-  });
+async function probeAny() {
+  // Return true as soon as any configured case's endpoint accepts a connection.
+  const results = await Promise.all(cases.map((c) => c.probe()));
+  return results.some(Boolean);
 }
 
 async function probeSudo() {
@@ -98,9 +165,9 @@ async function probeSudo() {
   }
   console.log('  restart issued; waiting 4s for router to come back...');
   await new Promise((r) => setTimeout(r, 4000));
-  // Confirm router is back by probing the tunnel again.
+  // Confirm router is back by probing ANY configured endpoint.
   for (let attempt = 0; attempt < 10; attempt++) {
-    if (await probeTunnel()) return true;
+    if (await probeAny()) return true;
     await new Promise((r) => setTimeout(r, 500));
   }
   throw new Error('router did not come back within 9s after probe-restart');
@@ -109,25 +176,32 @@ async function probeSudo() {
 // --- the test -------------------------------------------------------------
 
 async function warmup(bridge) {
-  const v = await bridge.call('$/version');
+  // Idempotent + generous budget. On TCP through socat, the first connect
+  // after a recent router restart can race socat's per-child unix-backend
+  // dial — the TCP handshake succeeds, the unix dial fails, socat closes
+  // the TCP side, Bridge retries. idempotent:true absorbs that blip so the
+  // scenario starts from a known-good state instead of erroring out before
+  // the interesting part begins.
+  const v = await bridge.callWithOptions('$/version', [], {
+    idempotent: true,
+    timeoutMs: 5000,
+  });
   console.log(`  warm-up $/version: ${v}`);
 }
 
-async function runScenario(label, idempotent) {
-  console.log(`\n=== ${label} (idempotent=${idempotent}) ===`);
-  // Pre-probe: between scenarios the SSH tunnel can wobble (or even die from
-  // the previous restart cycle). Without this check, a dead tunnel would
+async function runScenario(c, label, idempotent) {
+  console.log(`\n=== ${label} (${c.name}, idempotent=${idempotent}) ===`);
+  // Pre-probe: between scenarios the endpoint can wobble (or even die from
+  // the previous restart cycle). Without this check, a dead endpoint would
   // surface as an unhandled `error` event from Bridge.connect — kills the
   // script and obscures the real result.
-  if (!(await probeTunnel())) {
-    console.error(`  Tunnel ${SOCKET} not reachable — aborting scenario.`);
-    console.error(`  Re-open the SSH tunnel and rerun.`);
+  if (!(await c.probe())) {
+    console.error(`  Endpoint ${c.label} (${c.name}) not reachable — aborting scenario.`);
+    console.error(`  Re-open:`);
+    console.error(`  ${c.reopenHint}`);
     process.exit(1);
   }
-  const bridge = await Bridge.connect({
-    socket: SOCKET,
-    reconnect: { enabled: true, baseDelayMs: 200, maxDelayMs: 2000 },
-  });
+  const bridge = await Bridge.connect(c.opts);
   bridge.on('reconnect', () => console.log('  [bridge] reconnected'));
   bridge.on('disconnect', () => console.log('  [bridge] disconnected'));
   bridge.on('error', (e) => console.log(`  [bridge] error: ${e.message}`));
@@ -186,51 +260,8 @@ async function runScenario(label, idempotent) {
   return { total: results.length, ok, connErrs, timeouts, others };
 }
 
-// --- main -----------------------------------------------------------------
-
-console.log(`Socket:   ${SOCKET}`);
-console.log(`SSH host: ${SSH_HOST}`);
-
-const tunnelAlive = existsSync(SOCKET) && (await probeTunnel());
-if (!tunnelAlive) {
-  console.error(`
-Cannot connect to ${SOCKET} — the SSH tunnel appears closed (stale socket
-file or SSH process gone). (Re-)open the tunnel in a separate terminal:
-
-  rm -f ${SOCKET}
-  ssh -N -L ${SOCKET}:/var/run/arduino-router.sock ${SSH_HOST}
-`);
-  process.exit(1);
-}
-
-try {
-  if (!(await probeSudo())) {
-    console.error(`
-Passwordless sudo for 'systemctl restart arduino-router' is not configured
-on the Q. On the UNO Q, run:
-
-  sudo visudo -f /etc/sudoers.d/arduino-router
-
-And add this single line:
-
-  arduino ALL=(root) NOPASSWD: /bin/systemctl restart arduino-router
-
-Then rerun this script.
-`);
-    process.exit(1);
-  }
-} catch (err) {
-  console.error(`Sudo probe failed: ${err.message}`);
-  process.exit(1);
-}
-
-try {
-  const idResult = await runScenario('Idempotent retry', true);
-  // Let the router stabilize between scenarios.
-  await new Promise((r) => setTimeout(r, 3000));
-  const noResult = await runScenario('No retry (default)', false);
-
-  console.log('\n=== Verdict ===');
+function reportVerdict(transport, idResult, noResult) {
+  console.log(`\n--- Verdict (${transport}) ---`);
   let code = 0;
 
   // The retry contract from CONTEXT.md §6.4 says: idempotent calls survive
@@ -272,7 +303,68 @@ try {
     code = 1;
   }
 
-  process.exit(code);
+  return code;
+}
+
+// --- main -----------------------------------------------------------------
+
+console.log(`SSH host: ${SSH_HOST}`);
+console.log(`Transports: ${cases.map((c) => `${c.name}(${c.label})`).join(', ')}`);
+
+if (!(await probeAny())) {
+  console.error(`\nCannot reach any configured endpoint. Reopen:`);
+  for (const c of cases) {
+    console.error(`  [${c.name}] ${c.label}:`);
+    console.error(`    ${c.reopenHint}`);
+  }
+  process.exit(1);
+}
+
+try {
+  if (!(await probeSudo())) {
+    console.error(`
+Passwordless sudo for 'systemctl restart arduino-router' is not configured
+on the Q. On the UNO Q, run:
+
+  sudo visudo -f /etc/sudoers.d/arduino-router
+
+And add this single line:
+
+  arduino ALL=(root) NOPASSWD: /bin/systemctl restart arduino-router
+
+Then rerun this script.
+`);
+    process.exit(1);
+  }
+} catch (err) {
+  console.error(`Sudo probe failed: ${err.message}`);
+  process.exit(1);
+}
+
+try {
+  let exitCode = 0;
+  const runs = [];
+
+  for (const c of cases) {
+    console.log(`\n\n########  Transport: ${c.name} (${c.label})  ########`);
+    const idResult = await runScenario(c, 'Idempotent retry', true);
+    // Let the router stabilize between scenarios.
+    await new Promise((r) => setTimeout(r, 3000));
+    const noResult = await runScenario(c, 'No retry (default)', false);
+    runs.push({ transport: c.name, idResult, noResult });
+    // Stabilise again before the next transport's round (if any).
+    if (c !== cases[cases.length - 1]) {
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+  }
+
+  console.log('\n=== Verdict ===');
+  for (const r of runs) {
+    const c = reportVerdict(r.transport, r.idResult, r.noResult);
+    if (c !== 0) exitCode = c;
+  }
+
+  process.exit(exitCode);
 } catch (err) {
   console.error('\nFatal:', err);
   process.exit(1);

@@ -549,19 +549,21 @@ Router version at time of testing: **0.8.0**.
 - **Versioning:** start at `0.1.0`. Semver strict once we hit `1.0.0`.
 - **License:** MIT (revisit if Arduino's GPL router imposes anything on a protocol-level client — it shouldn't, but worth a quick legal sanity check before first publish).
 - **Update this file** whenever a decision changes. Don't let it go stale. Procedures, commands, and style conventions live in [CLAUDE.md](CLAUDE.md); update them there.
+- **Priority (2026-04-22):** multi-Q **Variant A** (§12, steps 1–3: socat relay + Bridge HAL refactor + UnoQRouterApi credentials) takes precedence over the Arduino Cloud package (§13). Rationale: Variant A is bounded, delivers real value today (remote single-Q access from any n8n instance), and forces two architectural improvements — centralised credentials and a swappable Transport layer — that the project needs regardless of multi-Q. Arduino Cloud integration has a weaker demand signal (the official Node-RED equivalent has minimal adoption) and is deferred until Variant A ships. Multi-Q Variant B (Tailscale overlay, §12.5.2) remains lower priority. `feat/multi-q` branch is the working branch; §12 is the authoritative spec.
 
 ---
 
 ## 12. Multi-Q support
 
-**Status:** designed on the `feat/multi-q` branch as of 2026-04-21. Not yet implemented. This section is the authoritative spec — start here when picking up the feature.
+**Status:** designed on the `feat/multi-q` branch as of 2026-04-21. **Active — Variant A is current priority** (see §11). Not yet implemented. This section is the authoritative spec — start here when picking up the feature.
 
 ### 12.1 Motivation
 
-Today a single n8n instance talks to a single UNO Q via the local unix socket, same host. The multi-Q story covers two scenarios:
+Today a single n8n instance talks to a single UNO Q via the local unix socket, same host. The multi-Q story covers three scenarios, all served by Variant A (steps 1–3):
 
-1. **Remote dev access.** Developer's PC running n8n locally needs to reach a Q across the network. Current workaround is an SSH-tunneled unix socket (§9, CLAUDE.md); fine for occasional tests, clunky for continuous use.
-2. **Orchestrator + satellites.** The anticipated Ventuno Q (more powerful than the UNO Q) acts as the n8n orchestrator driving multiple satellite UNO Qs over the LAN. One workflow reads a sensor from Q-A and actuates a motor on Q-B, selected by hostname.
+1. **Remote single-Q access.** n8n running on any separate machine (server, home PC, cloud VM) needs to reach a UNO Q over the network. This is a first-class use case, not a dev convenience: anyone who already has an n8n instance and adds a UNO Q, or who prefers not to run n8n on the board itself, hits this immediately. Current workaround is an SSH-tunneled unix socket (§9, CLAUDE.md); fine for occasional tests, not viable for continuous use.
+2. **Multi-board orchestration.** A single n8n instance drives multiple UNO Qs, each addressed by its own credential. One workflow reads a sensor from Q-A and actuates a motor on Q-B, selected by hostname. Does not require the Ventuno Q — any machine running n8n can act as orchestrator.
+3. **Ventuno Q as dedicated orchestrator.** The anticipated Ventuno Q (more powerful than the UNO Q) runs n8n and drives satellite UNO Qs over the LAN. Scenario 2 at a dedicated node, rather than a developer's PC.
 
 Neither scenario is supported by today's single-socket-same-host design.
 
@@ -786,10 +788,12 @@ ENTRYPOINT ["/entrypoint.sh"]
 
 ```sh
 #!/bin/sh
-exec socat TCP-LISTEN:${INTERNAL_PORT:-5775},reuseaddr,fork UNIX-CONNECT:/var/run/arduino-router.sock
+exec socat TCP-LISTEN:${INTERNAL_PORT:-5775},reuseaddr,fork UNIX-CONNECT:/host/var/run/arduino-router.sock
 ```
 
 The `fork` option on socat gives one child process per incoming TCP connection, each mapping 1:1 to a fresh unix-socket connection to `arduino-router`. The router already supports multiple concurrent clients on its unix socket (§3), so no serialisation is required. socat itself is PID 1 — if it dies, the container exits and the restart policy takes over.
+
+**Why `/host/var/run/arduino-router.sock` and not `/var/run/arduino-router.sock`:** Docker file bind-mounts pin the container's mount entry to the host inode at mount time. Every `systemctl restart arduino-router` unlinks the old socket and creates a new one (different inode), and a file-level bind-mount stays bound to the orphan — `connect(2)` inside the container fails forever until the relay container itself restarts. Verified empirically against the real Q: the file-level mount flaps on every router restart; the directory-level mount recovers automatically. So the relay mounts `/var/run` (directory) under a separate `/host/var/run` path inside the container, and socat dials through the fresh path lookup. See §12.5.1's docker-compose fragment.
 
 **docker-compose fragment (conceptual):**
 
@@ -800,7 +804,10 @@ unoq-relay:
   ports:
     - "127.0.0.1:5775:5775"                          # bind to loopback by default; override for LAN
   volumes:
-    - /var/run/arduino-router.sock:/var/run/arduino-router.sock:rw
+    # Directory mount, NOT file mount — see rationale above. Each socat child
+    # re-resolves the path, so the socket file the router re-creates on every
+    # restart is picked up transparently.
+    - /var/run:/host/var/run:rw
   # environment:
   #   INTERNAL_PORT: 5775                            # default
 ```
@@ -833,7 +840,7 @@ ENTRYPOINT ["/entrypoint.sh"]
 1. Start `tailscaled` as a background process, wait for its local API socket to come up.
 2. If not already authenticated (state dir empty), run `tailscale up --authkey=${TS_AUTHKEY} --hostname=${TS_HOSTNAME}` to join the tailnet.
 3. Configure `tailscale serve --bg --tcp ${TS_PORT:-5775} tcp://127.0.0.1:${INTERNAL_PORT:-5775}` so the tailnet-facing port forwards into the container's loopback.
-4. `exec socat TCP-LISTEN:${INTERNAL_PORT:-5775},reuseaddr,fork UNIX-CONNECT:/var/run/arduino-router.sock` — the same PID 1 as Variant A.
+4. `exec socat TCP-LISTEN:${INTERNAL_PORT:-5775},reuseaddr,fork UNIX-CONNECT:/host/var/run/arduino-router.sock` — the same PID 1 as Variant A. The `/host/var/run` directory mount (not a file mount) is what makes the relay survive `systemctl restart arduino-router` — see §12.5.1.
 
 **docker-compose fragment (conceptual):**
 
@@ -848,7 +855,8 @@ unoq-relay:
   devices:
     - /dev/net/tun
   volumes:
-    - /var/run/arduino-router.sock:/var/run/arduino-router.sock:rw
+    # Directory mount, not file mount — see §12.5.1 rationale.
+    - /var/run:/host/var/run:rw
     - tailscale-state:/var/lib/tailscale
   environment:
     TS_AUTHKEY: ${TS_AUTHKEY:?set in .env or pass at run time}
@@ -960,3 +968,87 @@ Each step is also shippable on its own — a release containing only steps 1–3
 - §6.4 — Method node guards and rate limits. These remain the application-layer defense for compromised tailnet peers (§12.5.1).
 - §6.5 — "Credentials deferred to v2". Superseded here; see cross-reference at the top of that section.
 - §8 — Open items. Multi-Q-specific opens live here in §12.8; §8 stays focused on v1 hardware verification items.
+
+---
+
+## 13. Arduino Cloud integration (`n8n-nodes-arduino-cloud`)
+
+**Status:** scoped 2026-04-21. Not yet implemented. Separate npm package, not an extension of `n8n-nodes-uno-q`. Current priority per §11.
+
+### 13.1 Motivation
+
+Arduino Cloud is the hosted counterpart to the on-device UNO Q story. Users who've modelled their devices as Arduino Cloud **Things** with **Properties** want to drive them from n8n without writing MCU-side code at all — the Cloud already owns the transport, auth, and fleet model. Two scenarios:
+
+1. **Cloud-native workflows.** "When temperature variable exceeds 30, send a Slack and turn on a fan variable" — no UNO Q required at all, every Arduino Cloud user is a prospect.
+2. **Hybrid with UNO Q.** A workflow reads a sensor via `UnoQCall` and publishes the result to Arduino Cloud for dashboards and mobile-app visibility. Two packages side by side, same n8n instance, no coupling.
+
+Confirmed 2026-04-21: no existing `n8n-nodes-arduino*` package on npm — we own the namespace. Workarounds today are HTTP Request + manual OAuth flow, which is exactly the friction we eliminate.
+
+### 13.2 Why a separate package, not more nodes in `n8n-nodes-uno-q`
+
+- Different audience: every Arduino Cloud user, not just UNO Q owners.
+- Different credential (OAuth2 Client ID/Secret vs. router socket/TCP).
+- Different transport (HTTPS + WebSocket/MQTT vs. msgpack-rpc on unix socket).
+- Independent release cadence — Arduino Cloud API changes don't force a UNO Q bump and vice versa.
+- Cleaner discovery in n8n's community-nodes directory (two focused entries beat one grab-bag).
+
+What they *share* and how we reuse it: the BridgeManager singleton pattern (§6.3), the Method Guard + Rate Limit primitives from `UnoQTool` (§6.4 in the [n8n-nodes README](packages/n8n-nodes/README.md)). Those are architectural patterns, not imported code — we reimplement them in the new package (small files, zero coupling wins over DRY here).
+
+### 13.3 SDK dependencies — two libraries, not one
+
+This is the load-bearing choice. Arduino ships **two** official JS SDKs for Cloud access, and we need both:
+
+- **[`@arduino/arduino-iot-client`](https://www.npmjs.com/package/@arduino/arduino-iot-client)** — REST client. OAuth2 client credentials against `api2.arduino.cc/iot`. Covers: Things, Properties (including `publish` to write values), Devices, Series (time-series analytics), Dashboards, Triggers (CRUD for Arduino Cloud's own alert triggers), OTA, Tags, Templates, NetworkCredentials. Rate limit: 10 req/s authenticated.
+- **[`arduino-iot-js`](https://github.com/arduino/arduino-iot-js)** — **MQTT-over-WebSocket** client. `onPropertyValue(thingId, propertyName, cb)` subscribes to realtime updates from the Arduino Cloud broker using the *same* user OAuth2 credentials. This is the canonical third-party realtime path; it removes the need for polling or IFTTT-proxied webhooks that an earlier read of the docs wrongly concluded were necessary.
+
+**Correction on record:** an earlier design draft assumed the Arduino Cloud MQTT broker was reserved for devices and that third-party subscription required either polling or Maker-plan webhooks. `arduino-iot-js` refutes that — it exists precisely to let user-credentialed clients subscribe. The realtime trigger uses it.
+
+Auth flow for both SDKs: `POST https://api2.arduino.cc/iot/v1/clients/token` with `grant_type=client_credentials`, `client_id`, `client_secret`, `audience=https://api2.arduino.cc/iot`, optional `organization_id`. The credential class owns token caching + refresh (~30 s before expiry); both SDK instances consume the same cached token.
+
+### 13.4 Node surface
+
+Four nodes + one credential. Deliberately kept small; the "big multi-resource node" is the n8n idiom (Gmail, Slack, HubSpot all work this way) and avoids palette pollution.
+
+| Node | Type | What it does |
+|---|---|---|
+| `ArduinoCloud` | Action | CRUD + value I/O across Thing, Property, Device, Series, Tag, Dashboard, Trigger. Resource + Operation dropdowns. `Property.publish` is the headline write operation. |
+| `ArduinoCloudOta` | Action | Firmware upload + push-to-fleet. Split from `ArduinoCloud` because the ergonomics differ (binary input, long-running, fleet-filter-by-tag). |
+| `ArduinoCloudTrigger` | Trigger | Realtime: fires on property update. Backed by `arduino-iot-js` MQTT-over-WS. No polling. |
+| `ArduinoCloudTool` | AI Tool | `usableAsTool: true` surface for the AI Agent — read/write property, query timeseries. Reuses the Method Guard + Rate Limit primitives from `UnoQTool`. |
+
+**Credential:** `arduinoCloudOAuth2Api` — Client ID, Client Secret, optional Organization ID. `Test Connection` runs a cheap REST call (e.g. list Things page 1 size 1). Token cache is a process-singleton keyed by credential ID, shared across all four node types and both SDKs.
+
+### 13.5 What was considered and rejected
+
+- **Single node including OTA.** Firmware upload needs a binary-file input, async progress, and fleet targeting logic that differs enough from the CRUD flow to clutter the shared UI. Keeping OTA separate means the main node stays clean.
+- **Polling trigger as default.** Rejected once `arduino-iot-js` was identified. Polling at n8n-workflow cadence against 10 req/s REST is wasteful when MQTT-over-WS gives push. We keep polling as a fallback mode *inside* `ArduinoCloudTrigger` for edge cases (organizations with the MQTT path blocked, or running behind firewalls that kill long-lived WebSockets), selectable via a node option.
+- **IFTTT/Zapier webhook bridge.** Would work but adds an external dependency and a second account per user. Only makes sense for Arduino Cloud **Triggers** (the Cloud's own alert feature, Maker+ plan) whose actions land as webhooks. If a user has already configured those, a generic n8n **Webhook** node reads them — no dedicated node needed.
+- **Custom bridge package `@raasimpact/arduino-cloud-bridge`.** Considered by analogy with `@raasimpact/arduino-uno-q-bridge`. Rejected: Arduino already publishes two solid SDKs; reimplementing their wire protocol adds maintenance for no gain. The n8n package depends on the SDKs directly; the only wrapper we write is a thin `ArduinoCloudManager` singleton (token cache + MQTT connection + subscription refcount).
+- **Extending the UnoQ BridgeManager to manage Cloud connections too.** Tempting for "one place to manage all transports" but the contracts are different (msgpack-rpc vs. HTTP+MQTT, socket vs. SDK object), coupling would leak across packages, and the two managers share no runtime state. Separate singletons, same pattern.
+
+### 13.6 Delivery plan
+
+1. **Package scaffold + credential.** `packages/n8n-nodes-arduino-cloud/` under the monorepo. `arduinoCloudOAuth2Api` credential with Test Connection. Unit tests mock the token endpoint. **Deliverable:** green CI, credential usable from any HTTP Request node as an early smoke test.
+2. **`ArduinoCloud` action node, MVP resources.** Start with Thing (list/get) + Property (list/get/**publish**) + Device (list/get). Cover 90% of use cases. Integration tests against a real Arduino Cloud sandbox account, gated on env vars analogous to `UNOQ_SOCKET` (e.g. `ARDUINO_CLOUD_CLIENT_ID` / `ARDUINO_CLOUD_CLIENT_SECRET`). **Deliverable:** `npm publish` v0.1.0, usable end-to-end for read/write.
+3. **`ArduinoCloudTrigger` with `arduino-iot-js`.** `ArduinoCloudManager` singleton holds one MQTT/WS connection per credential, refcounts subscriptions by `thingId/propertyName` — same architecture as [`BridgeManager`](packages/n8n-nodes/src/BridgeManager.ts). Polling fallback mode behind a node option. **Deliverable:** v0.2.0, realtime workflows usable.
+4. **`ArduinoCloudTool` for AI Agent.** Port the Method Guard + Rate Limit code shape from `UnoQTool`, adapt for property-centric semantics. **Deliverable:** v0.3.0.
+5. **Remaining resources on `ArduinoCloud`.** Series, Dashboard, Trigger (the Arduino Cloud alert triggers, not our n8n Trigger node), Tag. CRUD only, thin wrappers. **Deliverable:** v0.4.0.
+6. **`ArduinoCloudOta`.** Last because it's the most complex (binary input, progress, fleet filtering). **Deliverable:** v1.0.0 candidate once validated on real hardware OTA.
+
+**Docs:** top-level README gets a short "Two packages" section pointing users at the right one based on deployment shape. Each package keeps its own detailed README.
+
+### 13.7 Open items
+
+- **`organization_id` placement.** Put it on the credential (one credential per org, clean) or per-node field (one credential, many orgs)? Default: credential. Revisit if users with multi-org access complain.
+- **Rate limit 10 req/s enforcement.** Centralise in the manager (per-credential token-bucket) or rely on 429 retry? Central bucket is safer for bulk workflows; worth the extra code. Decide during step 2.
+- **WebSocket drop handling.** `arduino-iot-js` behaviour on long disconnects, reconnect backoff, whether in-flight subscriptions auto-resume. Verify empirically during step 3; if auto-resume is shaky, the manager owns the reconnect loop.
+- **Webhook payload shape** of Arduino Cloud's native Triggers is underdocumented. If we ever add a convenience "Arduino Cloud Trigger webhook" node (not in the MVP), one paid-account round-trip sample is required before shipping.
+- **Monorepo shape.** Two production packages (`bridge`, `n8n-nodes`) plus this makes three. Top-level scripts (§CLAUDE.md "Commands") already fan out across workspaces; confirm lint/test/build run cleanly on the new package without rewiring.
+
+### 13.8 Related sections
+
+- §6.3 — BridgeManager singleton. `ArduinoCloudManager` is architecturally identical: one process-wide instance per credential, refcounts subscriptions, stashed on `globalThis` under a `Symbol.for(...)` key to survive the esbuild-bundled-per-node-file model.
+- §6.4 — Method Guard + Rate Limit on `UnoQTool`. `ArduinoCloudTool` reuses the same ergonomics (user-editable JS predicate + sliding-window limiter + `budget` in guard scope).
+- §8 — Open items. §13.7 keeps Arduino-Cloud-specific opens local; §8 stays about UNO Q v1.
+- §11 — Project-level decisions. Priority flip recorded there.
+- §12 — Multi-Q. Paused for §13. Re-read §12 when resuming.
