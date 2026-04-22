@@ -14,6 +14,12 @@ import type { TransportDescriptor } from '@raasimpact/arduino-uno-q-bridge';
  */
 const SINGLETON_KEY = Symbol.for('@raasimpact/arduino-uno-q/bridge-manager');
 
+// Activate with DEBUG=bridge (shares the env var with the bridge package).
+const DEBUG = process.env.DEBUG?.includes('bridge') ?? false;
+function debug(category: string, ...args: unknown[]) {
+  if (DEBUG) console.debug(`[bridge-manager:${category}]`, ...args);
+}
+
 interface BridgeEntry {
   bridge: Bridge | null;
   refCount: number;
@@ -58,14 +64,18 @@ export class BridgeManager {
   }
 
   async acquire(descriptor: TransportDescriptor): Promise<Bridge> {
+    const key = describeTransport(descriptor);
     const entry = this.getEntry(descriptor);
     if (entry.pendingClose) {
+      debug('acquire', key, 'awaiting pendingClose');
       await entry.pendingClose;
     }
     entry.refCount++;
+    const opened = !entry.bridge;
     if (!entry.bridge) {
       entry.bridge = await Bridge.connect({ transport: descriptor });
     }
+    debug('acquire', key, `refCount=${entry.refCount}`, opened ? 'opened new bridge' : 'reused bridge');
     return entry.bridge;
   }
 
@@ -77,21 +87,29 @@ export class BridgeManager {
    * socket.
    */
   async getBridge(descriptor: TransportDescriptor): Promise<Bridge> {
+    const key = describeTransport(descriptor);
     const entry = this.getEntry(descriptor);
     if (entry.pendingClose) {
+      debug('getBridge', key, 'awaiting pendingClose');
       await entry.pendingClose;
     }
+    const opened = !entry.bridge;
     if (!entry.bridge) {
       entry.bridge = await Bridge.connect({ transport: descriptor });
     }
+    if (opened) debug('getBridge', key, 'opened new bridge (no refcount change)');
     return entry.bridge;
   }
 
   async release(descriptor: TransportDescriptor): Promise<void> {
     const key = describeTransport(descriptor);
     const entry = this.entries.get(key);
-    if (!entry) return;
+    if (!entry) {
+      debug('release', key, 'no entry — noop');
+      return;
+    }
     entry.refCount--;
+    debug('release', key, `refCount=${entry.refCount}`);
     if (entry.refCount <= 0 && entry.bridge) {
       const oldBridge = entry.bridge;
       entry.bridge = null;
@@ -106,13 +124,24 @@ export class BridgeManager {
       // Subsequent acquire()/getBridge() for the same descriptor await
       // pendingClose so new connections wait for the old one to finish tearing
       // down.
+      debug(
+        'release:close-start',
+        key,
+        `activeHandlers=${oldBridge.activeHandlerCount}`,
+        `methods=${JSON.stringify(Object.fromEntries(entry.methodRefs))}`,
+      );
       const closePromise = oldBridge
         .waitForActiveHandlers(60_000)
-        .catch(() => {})
+        .catch((err) => {
+          debug('release:drain-error', key, (err as Error).message);
+        })
         .then(() => oldBridge.close())
-        .catch(() => {});
+        .catch((err) => {
+          debug('release:close-error', key, (err as Error).message);
+        });
       entry.pendingClose = closePromise;
       void closePromise.finally(() => {
+        debug('release:close-done', key);
         if (entry.pendingClose === closePromise) {
           entry.pendingClose = null;
         }
@@ -126,6 +155,7 @@ export class BridgeManager {
           entry.pendingClose === null
         ) {
           this.entries.delete(key);
+          debug('release:entry-deleted', key);
         }
       });
     }
@@ -133,21 +163,53 @@ export class BridgeManager {
 
   /** Increment ref for a method registration. Returns true if this is the first subscriber. */
   addMethodRef(descriptor: TransportDescriptor, method: string): boolean {
+    const key = describeTransport(descriptor);
     const entry = this.getEntry(descriptor);
     const current = entry.methodRefs.get(method) ?? 0;
     entry.methodRefs.set(method, current + 1);
+    debug('addMethodRef', key, method, `${current}→${current + 1}`, current === 0 ? '(first)' : '');
     return current === 0;
   }
 
   /** Decrement ref for a method registration. Returns true if this was the last subscriber. */
   removeMethodRef(descriptor: TransportDescriptor, method: string): boolean {
+    const key = describeTransport(descriptor);
     const entry = this.getEntry(descriptor);
     const current = entry.methodRefs.get(method) ?? 0;
     if (current <= 1) {
       entry.methodRefs.delete(method);
+      debug('removeMethodRef', key, method, `${current}→0`, '(last)');
       return true;
     }
     entry.methodRefs.set(method, current - 1);
+    debug('removeMethodRef', key, method, `${current}→${current - 1}`);
     return false;
+  }
+
+  /**
+   * Diagnostic snapshot of the per-descriptor entry. Used by the catch paths of
+   * the node implementations to dump state when a provide() / onNotify() call
+   * fails, so divergence between BridgeManager bookkeeping and actual router
+   * registrations is visible in the logs.
+   */
+  snapshot(descriptor: TransportDescriptor):
+    | {
+        key: string;
+        refCount: number;
+        methods: Record<string, number>;
+        pendingClose: boolean;
+        bridgeOpen: boolean;
+      }
+    | undefined {
+    const key = describeTransport(descriptor);
+    const entry = this.entries.get(key);
+    if (!entry) return undefined;
+    return {
+      key,
+      refCount: entry.refCount,
+      methods: Object.fromEntries(entry.methodRefs),
+      pendingClose: entry.pendingClose !== null,
+      bridgeOpen: entry.bridge !== null,
+    };
   }
 }

@@ -208,6 +208,16 @@ export class UnoQTrigger implements INodeType {
         });
       }
     } catch (err) {
+      // Dump state *before* removing our ref so the snapshot reflects what
+      // BridgeManager believed at the moment provide()/onNotify() was rejected.
+      // This is the smoking gun when refCount / methodRefs have drifted out of
+      // sync with the router's actual registrations (e.g. a prior test-mode
+      // listen that closed imperfectly and left a stale route).
+      const snap = manager.snapshot(descriptor);
+      console.warn(
+        `[unoq-trigger] register "${method}" (${mode}) failed: ${(err as Error).message} — manager state:`,
+        snap,
+      );
       manager.removeMethodRef(descriptor, method);
       await manager.release(descriptor);
       if (mode === 'request') {

@@ -51,6 +51,7 @@ services:
       - N8N_PROTOCOL=http
       - N8N_PORT=5678
       - WEBHOOK_URL=http://localhost:5678/
+      - DEBUG=bridge
 
 volumes:
   n8n_data:
