@@ -6,8 +6,10 @@ import {
   type ITriggerFunctions,
   type ITriggerResponse,
 } from 'n8n-workflow';
+import { describeTransport } from '@raasimpact/arduino-uno-q-bridge';
 import { BridgeManager } from '../../BridgeManager.js';
 import { PendingRequests } from '../../PendingRequests.js';
+import { CREDENTIAL_NAME, resolveTransport } from '../../transport-resolver.js';
 
 type TriggerMode = 'notify' | 'request';
 type ResponseMode = 'immediate' | 'deferred';
@@ -36,6 +38,16 @@ export class UnoQTrigger implements INodeType {
     },
     inputs: [],
     outputs: ['main'],
+    credentials: [
+      {
+        name: CREDENTIAL_NAME,
+        // Not required yet — one release cycle of backwards compatibility
+        // with the legacy per-node "Socket Path" option. The next major
+        // release flips this to required: true and drops the option.
+        required: false,
+        testedBy: 'unoQRouterApiTest',
+      },
+    ],
     properties: [
       {
         displayName: 'Method',
@@ -96,12 +108,13 @@ export class UnoQTrigger implements INodeType {
         default: {},
         options: [
           {
-            displayName: 'Socket Path',
+            displayName: 'Socket Path (Deprecated)',
             name: 'socketPath',
             type: 'string',
-            default: DEFAULT_SOCKET,
+            default: '',
+            placeholder: DEFAULT_SOCKET,
             description:
-              'Path to the arduino-router Unix socket. Change only for non-standard deployments.',
+              'Deprecated. Assign an "Arduino UNO Q Router" credential to this node instead. This field is honoured only when no credential is assigned and will be removed in the next major release.',
           },
           {
             displayName: 'Ack Value (JSON)',
@@ -142,11 +155,16 @@ export class UnoQTrigger implements INodeType {
         ? (this.getNodeParameter('responseMode') as ResponseMode)
         : 'immediate';
     const options = this.getNodeParameter('options', {}) as TriggerOptions;
-    const socketPath = options.socketPath || DEFAULT_SOCKET;
+
+    const { descriptor } = await resolveTransport(this, options.socketPath);
+    // Canonical transport string — included in the _unoQRequest envelope so
+    // a downstream Respond node can distinguish pending requests from
+    // different Qs if the user ever routes them through a shared PendingRequests.
+    const transport = describeTransport(descriptor);
 
     const manager = BridgeManager.getInstance();
-    const bridge = await manager.acquire(socketPath);
-    manager.addMethodRef(method);
+    const bridge = await manager.acquire(descriptor);
+    manager.addMethodRef(descriptor, method);
 
     const emit = (data: IDataObject) => {
       this.emit([this.helpers.returnJsonArray([data])]);
@@ -184,14 +202,14 @@ export class UnoQTrigger implements INodeType {
             emit({
               method,
               params,
-              _unoQRequest: { msgid, socketPath },
+              _unoQRequest: { msgid, transport },
             });
           });
         });
       }
     } catch (err) {
-      manager.removeMethodRef(method);
-      await manager.release();
+      manager.removeMethodRef(descriptor, method);
+      await manager.release(descriptor);
       if (mode === 'request') {
         throw new NodeOperationError(
           this.getNode(),
@@ -204,8 +222,8 @@ export class UnoQTrigger implements INodeType {
 
     const closeFunction = async () => {
       await unsubscribe();
-      manager.removeMethodRef(method);
-      await manager.release();
+      manager.removeMethodRef(descriptor, method);
+      await manager.release(descriptor);
     };
 
     return { closeFunction };

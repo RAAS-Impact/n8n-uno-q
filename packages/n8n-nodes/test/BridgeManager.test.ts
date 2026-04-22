@@ -109,8 +109,9 @@ describe('BridgeManager close race', () => {
 
     try {
       const manager = new BridgeManager();
+      const descriptor = { kind: 'unix' as const, path: router.socketPath };
 
-      const bridgeA = await manager.acquire(router.socketPath);
+      const bridgeA = await manager.acquire(descriptor);
       bridgeA.on('error', () => {}); // suppress unhandled-error noise
 
       // Install a provide handler that resolves after ~300ms — models a real
@@ -136,18 +137,18 @@ describe('BridgeManager close race', () => {
       setTimeout(() => resolveStuck('done'), 300);
 
       // Release starts the background close.
-      await manager.release();
+      await manager.release(descriptor);
 
       // Acquire a new bridge. Before the fix: returns instantly with a fresh
       // connection while the old one is still open → 2 sockets on the router.
       // After the fix: blocks until pendingClose resolves → only B's socket.
-      const bridgeB = await manager.acquire(router.socketPath);
+      const bridgeB = await manager.acquire(descriptor);
       bridgeB.on('error', () => {});
 
       expect(router.clients.length).toBe(1);
 
       // Cleanup: release B so the connection doesn't leak past the test
-      await manager.release();
+      await manager.release(descriptor);
       await new Promise((r) => setTimeout(r, 100));
     } finally {
       await router.stop();

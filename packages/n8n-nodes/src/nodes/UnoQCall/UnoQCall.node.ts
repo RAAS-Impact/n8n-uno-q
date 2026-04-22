@@ -1,11 +1,21 @@
 import {
   NodeOperationError,
+  type ICredentialTestFunctions,
+  type ICredentialsDecrypted,
   type IExecuteFunctions,
+  type INodeCredentialTestResult,
   type INodeExecutionData,
   type INodeType,
   type INodeTypeDescription,
 } from 'n8n-workflow';
+import { Bridge } from '@raasimpact/arduino-uno-q-bridge';
 import { BridgeManager } from '../../BridgeManager.js';
+import {
+  CREDENTIAL_NAME,
+  descriptorFromCredential,
+  resolveTransport,
+  type UnoQRouterCredential,
+} from '../../transport-resolver.js';
 
 type ParameterType = 'string' | 'number' | 'boolean' | 'json';
 type ParametersMode = 'none' | 'fields' | 'json';
@@ -22,6 +32,7 @@ interface CallOptions {
 
 const DEFAULT_SOCKET = '/var/run/arduino-router.sock';
 const DEFAULT_TIMEOUT_MS = 5000;
+const CRED_TEST_FN = 'unoQRouterApiTest';
 
 export class UnoQCall implements INodeType {
   description: INodeTypeDescription = {
@@ -37,6 +48,16 @@ export class UnoQCall implements INodeType {
     },
     inputs: ['main'],
     outputs: ['main'],
+    credentials: [
+      {
+        name: CREDENTIAL_NAME,
+        // Not required yet — one release cycle of backwards compatibility
+        // with the legacy per-node "Socket Path" option. The next major
+        // release flips this to required: true and drops the option.
+        required: false,
+        testedBy: CRED_TEST_FN,
+      },
+    ],
     properties: [
       {
         displayName: 'Method',
@@ -130,16 +151,23 @@ export class UnoQCall implements INodeType {
             description: 'How long to wait for the MCU response before erroring.',
           },
           {
-            displayName: 'Socket Path',
+            displayName: 'Socket Path (Deprecated)',
             name: 'socketPath',
             type: 'string',
-            default: DEFAULT_SOCKET,
+            default: '',
+            placeholder: DEFAULT_SOCKET,
             description:
-              'Path to the arduino-router Unix socket. Change only for non-standard deployments.',
+              'Deprecated. Assign an "Arduino UNO Q Router" credential to this node instead. This field is honoured only when no credential is assigned and will be removed in the next major release.',
           },
         ],
       },
     ],
+  };
+
+  methods = {
+    credentialTest: {
+      [CRED_TEST_FN]: testUnoQRouterApi,
+    },
   };
 
   async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
@@ -159,12 +187,12 @@ export class UnoQCall implements INodeType {
         const mode = this.getNodeParameter('parametersMode', i) as ParametersMode;
         const options = this.getNodeParameter('options', i, {}) as CallOptions;
         const timeout = options.timeout ?? DEFAULT_TIMEOUT_MS;
-        const socketPath = options.socketPath || DEFAULT_SOCKET;
         const idempotent = this.getNodeParameter('idempotent', i, false) as boolean;
 
+        const { descriptor } = await resolveTransport(this, options.socketPath, i);
         const params = buildParams(this, mode, i);
 
-        const bridge = await manager.getBridge(socketPath);
+        const bridge = await manager.getBridge(descriptor);
         const result = await bridge.callWithOptions(method, params, {
           timeoutMs: timeout,
           idempotent,
@@ -187,6 +215,54 @@ export class UnoQCall implements INodeType {
     }
 
     return [returnData];
+  }
+}
+
+/**
+ * Credential test for `unoQRouterApi`. n8n discovers this by name because the
+ * credential description (`testedBy: 'unoQRouterApiTest'`) references it
+ * through any node that declares the credential. Lives on UnoQCall because
+ * Call is the simplest node that touches a bridge — any of the three would
+ * do; Call minimises surprise.
+ */
+async function testUnoQRouterApi(
+  this: ICredentialTestFunctions,
+  credential: ICredentialsDecrypted,
+): Promise<INodeCredentialTestResult> {
+  const data = credential.data as UnoQRouterCredential | undefined;
+  if (!data) {
+    return { status: 'Error', message: 'Credential data is empty.' };
+  }
+
+  try {
+    const descriptor = descriptorFromCredential(
+      // Synthetic INode shape — descriptorFromCredential only needs `name`
+      // for error messages, not a real node. The NodeOperationError it
+      // throws is caught below and surfaced to the user.
+      { name: credential.name ?? 'credential' } as never,
+      data,
+    );
+    const bridge = await Bridge.connect({
+      transport: descriptor,
+      reconnect: { enabled: false },
+    });
+    try {
+      const version = await bridge.callWithOptions('$/version', [], {
+        idempotent: true,
+        timeoutMs: 3000,
+      });
+      return {
+        status: 'OK',
+        message: `Connected — arduino-router ${String(version)}`,
+      };
+    } finally {
+      await bridge.close();
+    }
+  } catch (err) {
+    return {
+      status: 'Error',
+      message: err instanceof Error ? err.message : String(err),
+    };
   }
 }
 

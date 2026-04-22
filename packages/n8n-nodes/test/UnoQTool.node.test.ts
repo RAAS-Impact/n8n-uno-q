@@ -41,6 +41,9 @@ function makeCtx(items: unknown[], params: Params, nodeId = 'node-test'): unknow
       name: 'UnoQTool',
       type: 'n8n-nodes-uno-q.unoQTool',
       typeVersion: 1,
+      // No `credentials` field: transport-resolver falls back to the legacy
+      // socket-path path, which in turn falls through to the default unix
+      // path that installFakeBridge seeds the BridgeManager entry for.
     }),
     continueOnFail: () => false,
     getNodeParameter: (name: string, _i: number, dflt?: unknown) => {
@@ -48,6 +51,12 @@ function makeCtx(items: unknown[], params: Params, nodeId = 'node-test'): unknow
       if (dflt !== undefined) return dflt;
       throw new Error(`fake ctx: no param "${name}" configured and no default`);
     },
+    // The mock never declares a credential, so getCredentials should never be
+    // reached; still stub it to surface any accidental call with a clear error.
+    getCredentials: async () => {
+      throw new Error('fake ctx: getCredentials should not be called in this test');
+    },
+    logger: { warn: () => {}, info: () => {}, debug: () => {}, error: () => {} },
   };
 }
 
@@ -57,10 +66,11 @@ interface BridgeCall {
   opts: { timeoutMs: number; idempotent: boolean };
 }
 
+const DEFAULT_DESCRIPTOR_KEY = 'unix:/var/run/arduino-router.sock';
+
 function installFakeBridge(result: unknown = 'ok'): BridgeCall[] {
   const calls: BridgeCall[] = [];
-  const mgr = BridgeManager.getInstance() as unknown as { bridge: unknown };
-  mgr.bridge = {
+  const fakeBridge = {
     callWithOptions: async (
       method: string,
       params: unknown[],
@@ -70,11 +80,27 @@ function installFakeBridge(result: unknown = 'ok'): BridgeCall[] {
       return result;
     },
   };
+  // BridgeManager is now Map-keyed by descriptor. Seed the entry for the
+  // default unix path that makeCtx's resolveTransport picks when no
+  // credential is declared on the fake node.
+  const mgr = BridgeManager.getInstance() as unknown as {
+    entries: Map<string, unknown>;
+  };
+  mgr.entries.set(DEFAULT_DESCRIPTOR_KEY, {
+    bridge: fakeBridge,
+    pendingClose: null,
+    refCount: 0,
+    methodRefs: new Map(),
+    descriptor: { kind: 'unix', path: '/var/run/arduino-router.sock' },
+  });
   return calls;
 }
 
 function clearBridge(): void {
-  (BridgeManager.getInstance() as unknown as { bridge: unknown }).bridge = null;
+  const mgr = BridgeManager.getInstance() as unknown as {
+    entries: Map<string, unknown>;
+  };
+  mgr.entries.clear();
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

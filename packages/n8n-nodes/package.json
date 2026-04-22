@@ -13,6 +13,9 @@
   },
   "n8n": {
     "n8nNodesApiVersion": 1,
+    "credentials": [
+      "dist/credentials/UnoQRouterApi.credentials.js"
+    ],
     "nodes": [
       "dist/nodes/UnoQCall/UnoQCall.node.js",
       "dist/nodes/UnoQTrigger/UnoQTrigger.node.js",

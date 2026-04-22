@@ -13,6 +13,7 @@ import {
   resetsInMs,
   type RateLimitWindow,
 } from '../../rateLimiter.js';
+import { CREDENTIAL_NAME, resolveTransport } from '../../transport-resolver.js';
 
 type ParameterType = 'string' | 'number' | 'boolean' | 'json';
 type ParametersMode = 'none' | 'fields' | 'json';
@@ -63,6 +64,13 @@ export class UnoQTool implements INodeType {
     usableAsTool: true,
     inputs: ['main'],
     outputs: ['main'],
+    credentials: [
+      {
+        name: CREDENTIAL_NAME,
+        required: false,
+        testedBy: 'unoQRouterApiTest',
+      },
+    ],
     properties: [
       {
         displayName:
@@ -217,12 +225,13 @@ export class UnoQTool implements INodeType {
             description: 'How long to wait for the MCU response before erroring the tool call.',
           },
           {
-            displayName: 'Socket Path',
+            displayName: 'Socket Path (Deprecated)',
             name: 'socketPath',
             type: 'string',
-            default: DEFAULT_SOCKET,
+            default: '',
+            placeholder: DEFAULT_SOCKET,
             description:
-              'Path to the arduino-router Unix socket. Change only for non-standard deployments.',
+              'Deprecated. Assign an "Arduino UNO Q Router" credential to this node instead. This field is honoured only when no credential is assigned and will be removed in the next major release.',
           },
         ],
       },
@@ -246,15 +255,23 @@ export class UnoQTool implements INodeType {
         const mode = this.getNodeParameter('parametersMode', i) as ParametersMode;
         const options = this.getNodeParameter('options', i, {}) as ToolOptions;
         const timeout = options.timeout ?? DEFAULT_TIMEOUT_MS;
-        const socketPath = options.socketPath || DEFAULT_SOCKET;
         const idempotent = this.getNodeParameter('idempotent', i, false) as boolean;
+
+        const { descriptor, credentialId } = await resolveTransport(
+          this,
+          options.socketPath,
+          i,
+        );
 
         const params = buildParams(this, mode, i);
 
-        // Single counter key shared between the Rate Limit enforcer and the
-        // guard's `budget` view — pairing method with node id so renaming the
-        // method on a node cleanly resets its history.
-        const counterKey = `${this.getNode().id}:${method}`;
+        // Counter key shared between Rate Limit enforcer and guard's budget
+        // view. Include credentialId so that a single node re-pointed at a
+        // different Q (via credential edit) starts fresh history against the
+        // new target instead of carrying the old Q's call rate into it.
+        const counterKey = credentialId
+          ? `${this.getNode().id}:${method}:${credentialId}`
+          : `${this.getNode().id}:${method}`;
         const rateLimit = this.getNodeParameter('rateLimit', i, {}) as {
           maxCalls?: number;
           window?: RateLimitWindow;
@@ -295,7 +312,7 @@ export class UnoQTool implements INodeType {
         // consume budget that a later legitimate call might need.
         recordCall(counterKey);
 
-        const bridge = await manager.getBridge(socketPath);
+        const bridge = await manager.getBridge(descriptor);
         const result = await bridge.callWithOptions(method, params, {
           timeoutMs: timeout,
           idempotent,
