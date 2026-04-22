@@ -1,11 +1,13 @@
 # @raasimpact/arduino-uno-q-bridge
 
-A Node.js MessagePack-RPC client for the [Arduino UNO Q](https://store.arduino.cc/products/uno-q) router (`arduino-router`). Lets any Node.js process read sensors, drive GPIO, call I2C devices, and react to async events from the MCU — with no Python proxy in the way.
+A Node.js MessagePack-RPC client for the [Arduino UNO Q](https://store.arduino.cc/products/uno-q) router (`arduino-router`). Lets any Node.js process read sensors, drive GPIO, call I²C devices, and react to async events from the MCU — with no Python proxy in the way.
+
+The transport is pluggable: connect to a local unix socket on the Q, or to a remote Q over TCP via a socket-proxy relay. Same API, same retry semantics.
 
 ## Requirements
 
 - Node.js 20+
-- Arduino UNO Q with `arduino-router` running (Unix socket at `/var/run/arduino-router.sock`)
+- Arduino UNO Q with `arduino-router` running (unix socket at `/var/run/arduino-router.sock` by default)
 - MCU sketch using [`Arduino_RouterBridge`](https://www.arduinolibraries.info/libraries/arduino_router-bridge)
 
 ## Installation
@@ -16,31 +18,39 @@ npm install @raasimpact/arduino-uno-q-bridge
 
 ## Quick start
 
+### Local — unix socket
+
 ```ts
 import { Bridge } from '@raasimpact/arduino-uno-q-bridge';
 
 const bridge = await Bridge.connect();
-// default socket: /var/run/arduino-router.sock
+// default: { transport: { kind: 'unix', path: '/var/run/arduino-router.sock' } }
 
-// Call a method registered on the MCU
 const temp = await bridge.call('read_temperature');
 
-// Fire and forget
 bridge.notify('log_event', 'startup');
 
-// Register as handler for inbound MCU calls
 await bridge.provide('set_config', async (params) => {
   // params is the array the MCU passed
   return 'ok';
 });
 
-// Subscribe to MCU notifications (no response expected)
 await bridge.onNotify('button_pressed', (params) => {
   console.log('Button', params[0], 'state:', params[1]);
 });
 
 await bridge.close();
 ```
+
+### Remote — TCP
+
+```ts
+const bridge = await Bridge.connect({
+  transport: { kind: 'tcp', host: 'myq.local', port: 5775 },
+});
+```
+
+The TCP endpoint is typically the `socat` relay container shipped in this repo ([`deploy/relay/`](https://github.com/raas-impact/n8n-uno-q/tree/main/deploy/relay)) running on the Q. It bind-mounts `/var/run/arduino-router.sock` and re-exposes it as plain TCP. No authentication, no transport encryption — only deploy on a trusted network.
 
 ## API
 
@@ -50,10 +60,18 @@ Returns a connected `Bridge` instance.
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `socket` | `string` | `/var/run/arduino-router.sock` | Unix socket path |
-| `reconnect.enabled` | `boolean` | `true` | Auto-reconnect on drop |
-| `reconnect.baseDelayMs` | `number` | `200` | Initial backoff delay |
-| `reconnect.maxDelayMs` | `number` | `5000` | Backoff cap |
+| `transport` | `TransportDescriptor` | `{ kind: 'unix', path: '/var/run/arduino-router.sock' }` | Where the bridge should connect. |
+| `socket` | `string` | — | Deprecated shortcut for `transport: { kind: 'unix', path: socket }`. |
+| `reconnect.enabled` | `boolean` | `true` | Auto-reconnect on drop. |
+| `reconnect.baseDelayMs` | `number` | `200` | Initial backoff delay. |
+| `reconnect.maxDelayMs` | `number` | `5000` | Backoff cap. |
+| `transportInstance` | `Transport` | — | Inject a pre-built transport (tests, custom wire implementations). When set, `transport` and `socket` are ignored. |
+
+```ts
+type TransportDescriptor =
+  | { kind: 'unix'; path: string }
+  | { kind: 'tcp'; host: string; port: number };
+```
 
 ### `bridge.call(method, ...params)`
 
@@ -77,7 +95,7 @@ Register as the handler for `method` on the router. The handler receives `(param
 
 ### `bridge.onNotify(method, handler)`
 
-Subscribe to inbound notifications. Returns an unsubscribe function. Multiple handlers per method are supported.
+Subscribe to inbound notifications. Returns an unsubscribe function. Multiple handlers per method are supported. Re-subscribed automatically on reconnect.
 
 ### `bridge.close()`
 
@@ -147,12 +165,40 @@ For per-*invocation* enforcement (rejecting specific calls at the gate — bad p
 
 ## Running inside Docker
 
-Bind-mount the router socket into the container:
+**Same-host (unix socket)** — bind-mount the router socket into the container:
 
 ```yaml
 volumes:
   - /var/run/arduino-router.sock:/var/run/arduino-router.sock
 ```
+
+**Remote (TCP)** — no bind-mount. The consuming container just opens a TCP connection to the host/port of the relay container running on the Q.
+
+## Transports
+
+Advanced callers can construct transports directly:
+
+```ts
+import { Bridge, UnixSocketTransport, TcpTransport } from '@raasimpact/arduino-uno-q-bridge';
+
+const bridge = await Bridge.connect({
+  transportInstance: new TcpTransport({ host: 'myq.local', port: 5775 }),
+});
+```
+
+Or implement the `Transport` interface for custom wire formats (stream-compatible proxies, in-memory test doubles, etc.):
+
+```ts
+import type { Transport } from '@raasimpact/arduino-uno-q-bridge';
+
+class MyTransport extends EventEmitter implements Transport {
+  async connect(): Promise<void> { /* … */ }
+  write(bytes: Uint8Array): boolean { /* … */ }
+  async close(): Promise<void> { /* … */ }
+}
+```
+
+Reconnect + subscription replay live in `Bridge`, not in `Transport` — a custom transport only has to emit `data` / `close` / `error`.
 
 ## Debug logging
 
