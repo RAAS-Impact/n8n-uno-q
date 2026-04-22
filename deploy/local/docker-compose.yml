@@ -1,0 +1,56 @@
+# Local dev stack for Mac (Docker Desktop).
+#
+# Standalone — NOT layered on deploy/n8n/docker-compose.yml. Too much diverges
+# (socket host path, advertised URL, package source) for override to be clean.
+#
+# Prerequisites:
+#   1. Build the packages from repo root:
+#        npm run build
+#   2. Forward the router socket from the Q via SSH (separate terminal, leave open):
+#        rm -f /tmp/arduino-router.sock
+#        ssh -N -L /tmp/arduino-router.sock:/var/run/arduino-router.sock arduino@linucs.local
+#
+# Usage:
+#   cd deploy/local
+#   docker compose up -d
+#   open http://localhost:5678
+#
+# After rebuilding packages:
+#   npm run build && docker compose restart n8n
+#
+services:
+  n8n:
+    image: n8nio/n8n:latest
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    volumes:
+      # SSH-tunneled Unix socket to arduino-router on the Q. Start the tunnel
+      # BEFORE `docker compose up` — if /tmp/arduino-router.sock doesn't exist,
+      # Docker Desktop silently creates it as an empty directory and n8n will
+      # fail with ENOTSOCK at first call.
+      - /tmp/arduino-router.sock:/var/run/arduino-router.sock
+      - n8n_data:/home/node/.n8n
+      # Same layout sync.sh creates on the Q, but via bind-mount from the
+      # workspace. Only package.json + dist/ — keeps node_modules/src out of
+      # n8n's scanner.
+      - ../../packages/bridge/package.json:/home/node/.n8n/custom/packages/bridge/package.json:ro
+      - ../../packages/bridge/dist:/home/node/.n8n/custom/packages/bridge/dist:ro
+      - ../../packages/n8n-nodes/package.json:/home/node/.n8n/custom/packages/n8n-nodes/package.json:ro
+      - ../../packages/n8n-nodes/dist:/home/node/.n8n/custom/packages/n8n-nodes/dist:ro
+    environment:
+      - GENERIC_TIMEZONE=Europe/Malta
+      - TZ=Europe/Malta
+      - N8N_COMMUNITY_PACKAGES_ENABLED=true
+      - N8N_COMMUNITY_PACKAGES_ALLOW_TOOL_USAGE=true
+      - EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS=true
+      - N8N_SECURE_COOKIE=false
+      # Browser and container share the Mac host — localhost works for both
+      # the editor and the webhook URLs built by Chat Trigger / Webhook nodes.
+      - N8N_HOST=localhost
+      - N8N_PROTOCOL=http
+      - N8N_PORT=5678
+      - WEBHOOK_URL=http://localhost:5678/
+
+volumes:
+  n8n_data:

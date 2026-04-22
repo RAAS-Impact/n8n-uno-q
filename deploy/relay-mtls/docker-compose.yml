@@ -1,0 +1,23 @@
+services:
+  unoq-relay:
+    build: .
+    image: ghcr.io/raasimpact/unoq-relay-mtls:latest
+    restart: unless-stopped
+    ports:
+      # Same binding semantics as the socat relay (deploy/relay/docker-
+      # compose.yml): default is 0.0.0.0 (exposed on the host's LAN) because
+      # mTLS is the gatekeeper here. Set UNOQ_RELAY_BIND=127.0.0.1 to
+      # restrict to loopback for SSH-tunnel-only consumption.
+      #
+      # Pick a distinct UNOQ_RELAY_PORT if you want to run Variant A and
+      # Variant C side-by-side on the same host.
+      - "${UNOQ_RELAY_BIND:-0.0.0.0}:${UNOQ_RELAY_PORT:-5775}:5775"
+    volumes:
+      # Directory mount — see CONTEXT.md §12.5.1 for the rationale (same
+      # docker file-bind-mount issue as the socat relay, resolved the same
+      # way). stunnel dials through /host/var/run/arduino-router.sock.
+      - /var/run:/host/var/run:rw
+      # Operator supplies ca.pem, server.pem, server.key under ./certs/
+      # before bringing the container up. See CONTEXT.md §12.5.3 for the
+      # openssl bootstrap commands.
+      - ./certs:/etc/stunnel/certs:ro

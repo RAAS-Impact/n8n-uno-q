@@ -612,7 +612,7 @@ The following alternatives were evaluated during design and rejected. Don't reli
 - **SSH reverse tunnels in production.** Great for dev (already documented in CLAUDE.md), too fragile for production. Tunnels die, need supervision, bake SSH creds into hosts, don't model per-device ACLs.
 - **Python proxy on each Q re-exposing the router.** Same objection as the rejected design in §2. Unnecessary hop, unnecessary second language, unnecessary container.
 - **Mock router for multi-Q dev.** Earlier section suggested a local mock; rejected here because the existing SSH-tunneled integration tests already exercise real hardware with essentially the same setup cost. Testing on real HW is winner — a mock would add maintenance without adding realism.
-- **Relay as a host-level service (systemd unit or bare binary).** Works but means the user has to install packages directly on the Q. Containerising it keeps the install surface uniform (the user already has `docker compose` in their workflow for n8n itself), makes uninstall clean (`docker compose down && rm -rf ...`), and leaves the Q's base image untouched. Also keeps the door open to eventually packaging as an Arduino App Lab Brick (§12.5.3) without reshaping the deliverable.
+- **Relay as a host-level service (systemd unit or bare binary).** Works but means the user has to install packages directly on the Q. Containerising it keeps the install surface uniform (the user already has `docker compose` in their workflow for n8n itself), makes uninstall clean (`docker compose down && rm -rf ...`), and leaves the Q's base image untouched. Also keeps the door open to eventually packaging as an Arduino App Lab Brick (§12.5.4) without reshaping the deliverable.
 
 ### 12.2.2 Overlay implementation — Tailscale default, alternatives in scope
 
@@ -767,10 +767,11 @@ export class UnoQRouterApi implements ICredentialType {
 
 **Lives under [deploy/relay/](deploy/relay/)** (to be created) alongside the existing `deploy/docker-compose.yml`.
 
-**Two variants, developed sequentially** (§12.7):
+**Three variants, mutually exclusive at the port level but complementary in intent**:
 
-- **Variant A — socat-only.** Minimal image: `alpine` + `socat`. Exposes the router's unix socket as a TCP listener bound to an arbitrary interface (loopback, LAN, or anything). No auth, no identity, nothing but byte-pumping. **Useful on its own** for a trusted-LAN setup and as the target the bridge HAL + credentials (§12.7 step 2) are developed against.
-- **Variant B — socat + Tailscale.** Adds `tailscaled` on top, so the TCP endpoint is reachable only from devices in the owner's tailnet. This is the production shape for untrusted networks. Everything except the enrollment UX and the network-layer transport is identical to Variant A.
+- **Variant A — socat-only.** Minimal image: `alpine` + `socat`. Exposes the router's unix socket as a TCP listener bound to an arbitrary interface (loopback, LAN, or anything). No auth, no identity, nothing but byte-pumping. **Useful on its own** for a trusted-LAN setup and as the target the bridge HAL + credentials (§12.7 step 2) are developed against. Binding is controlled by the `UNOQ_RELAY_BIND` env var (default `0.0.0.0` — public on the host's LAN; set to `127.0.0.1` for loopback-only + SSH reverse-tunnel consumers).
+- **Variant B — socat + Tailscale.** Adds `tailscaled` on top, so the TCP endpoint is reachable only from devices in the owner's tailnet. Network-layer authentication for untrusted networks. Everything except the enrollment UX and the network-layer transport is identical to Variant A.
+- **Variant C — socat replaced by `stunnel` + mTLS.** Listener terminates TLS and requires a client certificate signed by the user's CA. Application-layer authentication on top of plain TCP — orthogonal to Variant B (can be layered with it for defense in depth, or stand alone when a WireGuard overlay is overkill). See §12.5.3. This is the **default recommendation when the LAN is untrusted and Tailscale is not wanted**.
 
 #### 12.5.1 Variant A — socat-only (step 1 deliverable)
 
@@ -802,14 +803,16 @@ unoq-relay:
   image: ghcr.io/raasimpact/unoq-relay:latest        # built from deploy/relay/
   restart: unless-stopped
   ports:
-    - "127.0.0.1:5775:5775"                          # bind to loopback by default; override for LAN
+    # Binding is controlled by UNOQ_RELAY_BIND (default 0.0.0.0 — reachable
+    # from the host's LAN). Set UNOQ_RELAY_BIND=127.0.0.1 to restrict to
+    # loopback and consume via an SSH reverse tunnel (dev laptops or when
+    # the LAN is untrusted and you are not yet running Variant C).
+    - "${UNOQ_RELAY_BIND:-0.0.0.0}:${UNOQ_RELAY_PORT:-5775}:5775"
   volumes:
     # Directory mount, NOT file mount — see rationale above. Each socat child
     # re-resolves the path, so the socket file the router re-creates on every
     # restart is picked up transparently.
     - /var/run:/host/var/run:rw
-  # environment:
-  #   INTERNAL_PORT: 5775                            # default
 ```
 
 **Intended test rig for steps 1–2:**
@@ -891,7 +894,120 @@ Nothing on the n8n side changes for any of these swaps — the credential still 
 
 We don't ship Variant B images for these alternatives in v1. Document the swap path for users who need it; build additional variants only if demand appears.
 
-#### 12.5.3 Future App Lab Brick packaging
+#### 12.5.3 Variant C — socat replaced by stunnel with mTLS
+
+**Role:** application-layer authentication + transit encryption, terminated at the relay container. Listener is `stunnel`, not `socat` — stunnel handles the TLS handshake, verifies a client certificate signed by the owner's CA, and only then hands the plaintext stream off to its own `UNIX-CONNECT` into `/host/var/run/arduino-router.sock`. No separate socat process is needed; stunnel fills both roles.
+
+**When to deploy Variant C instead of (or in addition to) A/B:**
+
+- **Untrusted LAN, no Tailscale.** You don't want to run a WireGuard overlay (no Tailscale account, no self-hosted coordination server, can't install client on the consuming host, etc.) but the LAN isn't safe to leave Variant A bare on. Variant C is the drop-in replacement.
+- **Trusted network but "defense in depth" desired.** Layer Variant C inside Variant B: mTLS on top of the tailnet. A tailnet-peer-gone-rogue still can't reach the router without a valid client cert. Overhead is one container + PKI to maintain.
+- **Fleet deployments where cert-based identity is natural.** Each n8n instance gets a client cert bound to its identity; revocation is handled at the cert layer. Scales better than editing compose env per peer.
+
+**Why stunnel specifically (vs. `socat OPENSSL-LISTEN`, ghostunnel, nginx stream, or a custom Go binary):**
+
+- `stunnel` is a ~300 KB Alpine package with 25 years of production use. Single container, single config file, good-enough logging for ops.
+- `socat OPENSSL-LISTEN` can do the same job in-process but its error messages on handshake failures are OpenSSL-grade obscure; stunnel's are direct and actionable ("peer did not present a certificate", "certificate verify failed").
+- `ghostunnel` is more opinionated (hot-reload, SAN-based ACLs, Prometheus metrics) and worth the extra container when managing > ~10 peers; overkill at the single-user / small-fleet scale Variant C targets.
+- `nginx stream` works but drags in nginx's full config surface for a job that fits on half a page.
+- A custom Go binary would be the endgame if we wanted to avoid the OpenSSL ABI entirely, but it means shipping and maintaining our own binary and PKI tooling is already the operational burden — not the 100 LOC of `tls.Listen`.
+
+**Dockerfile (conceptual):**
+
+```dockerfile
+FROM alpine:3
+RUN apk add --no-cache stunnel
+COPY stunnel.conf /etc/stunnel/stunnel.conf
+# Runs as root inside the container — simpler read-access to the bind-mounted
+# /host/var/run/arduino-router.sock and to /etc/stunnel/certs. The threat
+# model assumes the container is isolated; escalation from a compromised
+# stunnel inside the container gives you what you already had by design.
+ENTRYPOINT ["stunnel", "/etc/stunnel/stunnel.conf"]
+```
+
+**stunnel.conf (conceptual):**
+
+```ini
+foreground = yes       ; run in the foreground so docker sees stunnel's PID
+pid =                  ; suppress pid-file creation (container lifecycle handles it)
+debug = 4              ; info-level; switch to 5–7 for handshake-trace debugging
+output = /dev/stderr
+
+[unoq-relay]
+accept = 5775
+connect = /host/var/run/arduino-router.sock
+cert = /etc/stunnel/certs/server.pem
+key = /etc/stunnel/certs/server.key
+CAfile = /etc/stunnel/certs/ca.pem
+verifyPeer = yes       ; require the client to present a certificate
+verifyChain = yes      ; check the presented cert against the CA chain
+```
+
+**docker-compose fragment (conceptual):**
+
+```yaml
+unoq-relay:
+  image: ghcr.io/raasimpact/unoq-relay-mtls:latest       # built from deploy/relay-mtls/
+  restart: unless-stopped
+  ports:
+    # mTLS is the gatekeeper, so binding public is the expected default here
+    # too (same env var semantics as Variant A, independent port if the user
+    # wants Variant A and C side-by-side on different ports).
+    - "${UNOQ_RELAY_BIND:-0.0.0.0}:${UNOQ_RELAY_PORT:-5775}:5775"
+  volumes:
+    - /var/run:/host/var/run:rw
+    - ./certs:/etc/stunnel/certs:ro                      # operator supplies ca.pem, server.pem, server.key
+```
+
+**Cert prerequisites (operator supplies, one-time setup):**
+
+Three PEM files in `deploy/relay-mtls/certs/` on the Q:
+
+- `ca.pem` — the owner's CA certificate. Used by stunnel to verify incoming client certs.
+- `server.pem` — server certificate for *this* Q, signed by the CA. SAN must include the hostname or IP the n8n side will connect to.
+- `server.key` — the matching private key.
+
+The n8n side needs three corresponding PEMs in its `unoQRouterApi` credential: `caCert` (same CA as above — used to verify the server), `clientCert` (client certificate, signed by the same CA), `clientKey` (the matching private key).
+
+Concrete bootstrap commands (`openssl` vanilla for the "5-minute demo" path; see §12.5.3 open items for step-ca integration):
+
+```bash
+# 1. Home CA, one-time (10y validity).
+openssl genrsa -out ca.key 4096
+openssl req -x509 -new -nodes -key ca.key -sha256 -days 3650 \
+  -subj "/CN=MyHome UnoQ CA" -out ca.pem
+
+# 2. Server cert for the Q "kitchen". SAN must match how n8n connects.
+openssl genrsa -out kitchen.key 2048
+openssl req -new -key kitchen.key -subj "/CN=kitchen" -out kitchen.csr
+cat > kitchen.ext <<EOF
+subjectAltName = DNS:kitchen.local, IP:192.168.1.42
+extendedKeyUsage = serverAuth
+EOF
+openssl x509 -req -in kitchen.csr -CA ca.pem -CAkey ca.key -CAcreateserial \
+  -days 730 -sha256 -extfile kitchen.ext -out kitchen.pem
+
+# 3. Client cert for the n8n instance.
+openssl genrsa -out n8n-laptop.key 2048
+openssl req -new -key n8n-laptop.key -subj "/CN=n8n-laptop" -out n8n-laptop.csr
+openssl x509 -req -in n8n-laptop.csr -CA ca.pem -CAkey ca.key -CAcreateserial \
+  -days 730 -sha256 -extfile <(echo "extendedKeyUsage = clientAuth") \
+  -out n8n-laptop.pem
+```
+
+**Bridge / n8n-side impact** (not yet implemented):
+
+- `TcpTransport` extends (or a sibling `TlsTransport` is added) to call `tls.connect({ host, port, ca, cert, key })` instead of plain `net.createConnection`. Transport events stay identical; Bridge's reconnect loop is unchanged.
+- `UnoQRouterApi` credential grows three optional fields (`caCert`, `clientCert`, `clientKey`) shown only when `transport === 'tcp'`. When populated, the descriptor becomes `{ kind: 'tcp', host, port, tls: { ca, cert, key } }`; when empty, the current plain-TCP descriptor is used.
+- No change to any node's behaviour beyond the descriptor carrying tls material transparently.
+
+**Open items for Variant C:**
+
+- **PKI bootstrap UX.** The raw-`openssl` path above works but is hostile to non-specialist users. Evaluate `step-ca` (smallstep) as an optional guided path — single binary, ACME-style issuance, CA state persisted locally. A wrapper script in `deploy/relay-mtls/pki/` that fronts either `openssl` or `step` behind interactive prompts is probably the right deliverable for v1 of this variant.
+- **Cert rotation mechanics.** stunnel needs a restart on cert change (no hot-reload in the Alpine build's default config). For rotation cadence every 1-2 years, `docker compose restart unoq-relay` is acceptable. If rotation frequency increases, reconsider ghostunnel (which does hot-reload).
+- **Revocation.** stunnel supports CRLs but the UX to distribute and refresh them on the Q is clunky. Practical alternative for small fleets: re-issue the CA and rotate every cert. Decide based on observed fleet size.
+
+#### 12.5.4 Future App Lab Brick packaging
 
 We know from §12.6 that Arduino's "Bricks" are mechanically Docker containers orchestrated by `arduino-app-cli`, but that third-party Bricks are not a supported category today — the Brick channel is Arduino-curated and there's no public spec, registry, or signing requirement. The relay container above is therefore **not** a Brick; it's a plain docker-compose service the user installs manually.
 
@@ -903,24 +1019,29 @@ If Arduino later opens the Brick channel to third-party contributions, this cont
 
 What would *not* change: the container contents (socat + tailscaled), the bridge and n8n side of the stack, or the security model. The relay stays the same relay; only the way a user acquires and configures it differs. So the effort is not wasted if Bricks never open up — and it's cleanly re-packageable if they do.
 
-### 12.5.4 Security model
+### 12.5.5 Security model
 
 **Threat model:** the satellite Q sits on an untrusted or semi-trusted LAN. Possible attackers include other devices on the LAN, the user's ISP, public WiFi co-tenants, and (hypothetically) anyone who compromises a device legitimately on the user's tailnet.
 
-**Defenses:**
+**Variant-by-variant defense posture:**
 
-- **Router attack surface is unchanged.** `arduino-router` still listens only on `/var/run/arduino-router.sock`. Nothing on the LAN can reach it. The relay container's `socat` listens inside the container's view of loopback (or host loopback under `network_mode: host`); either way, not reachable from any non-tailnet network path.
-- **Tailnet access is key-gated.** Every WireGuard packet is authenticated by the peer's public key. No valid key → no route → no connection attempt reaches the listener. Brute-forcing this is computationally infeasible.
-- **Per-device ACLs.** The Tailscale admin lets the owner constrain "only my laptop and my orchestrator Q may reach satellites tagged `tag:unoq`". A compromised unrelated tailnet device cannot touch the router.
-- **Transit encryption.** WireGuard, end-to-end. Tailscale's coordination server brokers initial key exchange but never sees data. DERP relays, when used as a P2P fallback, are end-to-end encrypted and opaque to Tailscale.
+- **Variant A (socat, trusted LAN):** no authentication, no encryption. Applicable only when the LAN is genuinely trusted and the Q's port is reachable only to devices the owner trusts. Set `UNOQ_RELAY_BIND=127.0.0.1` and consume via SSH reverse tunnel when the trust assumption no longer holds. This is the development-and-small-home-LAN shape.
+- **Variant B (socat + Tailscale):** network-layer authentication via WireGuard. Every packet is keyed by the peer's public key; no valid key, no route. Per-device ACLs via the tailnet admin. Transit encryption end-to-end. Appropriate for untrusted networks without needing application-layer secrets on the n8n side.
+- **Variant C (stunnel + mTLS):** application-layer authentication via client certificate + transit encryption via TLS. Appropriate for untrusted networks when a WireGuard overlay is unwanted, or **layered with Variant B** as defense in depth against compromised tailnet peers.
+
+**Defenses shared across all variants:**
+
+- **Router attack surface is unchanged.** `arduino-router` still listens only on `/var/run/arduino-router.sock`. Nothing on the LAN can reach it directly — only the relay container, via its bind-mount, can initiate unix-socket connections.
+- **Out-of-band channels stay put.** App Lab, `arduino-app-cli`, mDNS, etc. are unaffected by the relay deployment.
 
 **Out of scope for this layer:**
 
-- A compromised n8n host already legitimately on the tailnet. It can call any MCU method the router exposes. Mitigate at the Method node layer (guards, rate limits, HITL) — the existing §6.4 primitives stay the right answer for this.
-- A leaked Tailscale auth key exploited before first enrollment. Tailscale recommends single-use + short-TTL keys; the relay container's docs should say the same.
+- A compromised n8n host already legitimately authenticated (tailnet peer in B; cert holder in C). It can call any MCU method the router exposes. Mitigate at the Method node layer (guards, rate limits, HITL) — the existing §6.4 primitives stay the right answer for this.
+- A leaked Tailscale auth key exploited before first enrollment (Variant B). Tailscale recommends single-use + short-TTL keys; the relay container's docs should say the same.
+- A leaked client private key (Variant C). Rotate the CA and re-issue certs; at small fleet sizes this is cheaper than maintaining a CRL distribution pipeline. See §12.5.3 open items.
 - Physical access to the satellite Q. No network-layer solution addresses this.
 
-**What the model explicitly is *not*:** application-layer auth on top of msgpack-rpc. Authentication lives at the network layer, consistent with Tailscale's documented deployment patterns (internal DBs, SSH, dashboards are all commonly exposed behind tailnet membership alone). If a deployment's threat model requires defense-in-depth at the application layer, a pre-shared-key or token check can be added as a v2.1 feature — not required for v1.
+**What the model explicitly is *not* (by design in Variant A/B, *available* in Variant C):** application-layer auth on top of msgpack-rpc. Variants A and B push authentication entirely to the network layer — consistent with Tailscale's documented deployment patterns for internal services. Variant C exists for deployments that want defense in depth or that can't run a mesh overlay at all. Picking a variant is a deployment-time choice; the bridge and n8n-side code accept any of them via the `UnoQRouterApi` credential.
 
 ### 12.6 Verified findings about the Arduino ecosystem
 

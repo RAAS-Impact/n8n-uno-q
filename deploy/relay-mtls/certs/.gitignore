@@ -1,0 +1,6 @@
+# Keep the certs/ directory tracked in git (so the bind-mount path exists
+# in fresh clones) but exclude the actual cert material. See
+# CONTEXT.md §12.5.3 for where these files come from and how to generate
+# them.
+*
+!.gitignore

@@ -4,10 +4,20 @@ services:
     image: ghcr.io/raasimpact/unoq-relay:latest
     restart: unless-stopped
     ports:
-      # Bind to loopback by default. Override to 0.0.0.0:5775 (or a specific
-      # LAN IP) for trusted-LAN setups, or leave on loopback when Tailscale
-      # fronts the service (Variant B, CONTEXT.md §12.5.2).
-      - "127.0.0.1:${UNOQ_RELAY_PORT:-5775}:5775"
+      # Binding defaults to all interfaces (0.0.0.0) — the "trusted-LAN"
+      # deployment shape from CONTEXT.md §12.5.1: n8n on another machine on
+      # the same LAN talks to the Q directly over TCP. There is no auth on
+      # this path; only deploy with the default on networks you already
+      # trust.
+      #
+      # Set UNOQ_RELAY_BIND=127.0.0.1 to restrict the listener to loopback
+      # and require an SSH reverse tunnel from the consuming host — the
+      # right choice for dev laptops and any time the LAN is untrusted and
+      # you are not yet running the mTLS variant (deploy/relay-mtls/).
+      #
+      # For LAN deployments with a specific NIC, set UNOQ_RELAY_BIND to
+      # that interface's IP (e.g. 192.168.1.42).
+      - "${UNOQ_RELAY_BIND:-0.0.0.0}:${UNOQ_RELAY_PORT:-5775}:5775"
     volumes:
       # Mount /var/run as a DIRECTORY, not the socket file directly. Docker
       # file bind-mounts pin to the host inode at mount time — when arduino-
@@ -18,5 +28,3 @@ services:
       # the current socket file. Mounted under /host/var/run to keep the
       # container's own /var/run untouched.
       - /var/run:/host/var/run:rw
-    # environment:
-    #   INTERNAL_PORT: 5775

@@ -1,0 +1,8 @@
+{
+  "name": "n8n-uno-q-custom",
+  "private": true,
+  "dependencies": {
+    "@raasimpact/arduino-uno-q-bridge": "file:../packages/bridge",
+    "n8n-nodes-uno-q": "file:../packages/n8n-nodes"
+  }
+}
