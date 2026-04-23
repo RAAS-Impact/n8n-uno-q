@@ -32,7 +32,19 @@ const DEFAULTS: Required<Pick<Params, 'method' | 'parametersMode'>> = {
   parametersMode: 'none',
 };
 
-function makeCtx(items: unknown[], params: Params, nodeId = 'node-test'): unknown {
+interface CredentialStub {
+  id: string;
+  // The data transport-resolver returns when getCredentials is called. Drives
+  // the descriptor the rate limiter's key (and BridgeManager lookup) uses.
+  data: { transport: 'unix'; socketPath: string } | { transport: 'tcp'; host: string; port: number };
+}
+
+function makeCtx(
+  items: unknown[],
+  params: Params,
+  nodeId = 'node-test',
+  credential?: CredentialStub,
+): unknown {
   const full: Params = { ...DEFAULTS, ...params };
   return {
     getInputData: () => items.map((item) => ({ json: item ?? {} })),
@@ -41,9 +53,9 @@ function makeCtx(items: unknown[], params: Params, nodeId = 'node-test'): unknow
       name: 'UnoQTool',
       type: 'n8n-nodes-uno-q.unoQTool',
       typeVersion: 1,
-      // No `credentials` field: transport-resolver falls back to the legacy
-      // socket-path path, which in turn falls through to the default unix
-      // path that installFakeBridge seeds the BridgeManager entry for.
+      credentials: credential
+        ? { unoQRouterApi: { id: credential.id, name: 'stub' } }
+        : undefined,
     }),
     continueOnFail: () => false,
     getNodeParameter: (name: string, _i: number, dflt?: unknown) => {
@@ -51,10 +63,11 @@ function makeCtx(items: unknown[], params: Params, nodeId = 'node-test'): unknow
       if (dflt !== undefined) return dflt;
       throw new Error(`fake ctx: no param "${name}" configured and no default`);
     },
-    // The mock never declares a credential, so getCredentials should never be
-    // reached; still stub it to surface any accidental call with a clear error.
     getCredentials: async () => {
-      throw new Error('fake ctx: getCredentials should not be called in this test');
+      if (!credential) {
+        throw new Error('fake ctx: getCredentials called but no credential configured');
+      }
+      return credential.data;
     },
     logger: { warn: () => {}, info: () => {}, debug: () => {}, error: () => {} },
   };
@@ -66,9 +79,16 @@ interface BridgeCall {
   opts: { timeoutMs: number; idempotent: boolean };
 }
 
-const DEFAULT_DESCRIPTOR_KEY = 'unix:/var/run/arduino-router.sock';
+const DEFAULT_DESCRIPTOR = { kind: 'unix', path: '/var/run/arduino-router.sock' } as const;
 
-function installFakeBridge(result: unknown = 'ok'): BridgeCall[] {
+function descriptorKey(d: { kind: 'unix'; path: string } | { kind: 'tcp'; host: string; port: number }): string {
+  return d.kind === 'unix' ? `unix:${d.path}` : `tcp:${d.host}:${d.port}`;
+}
+
+function installFakeBridge(
+  result: unknown = 'ok',
+  descriptor: { kind: 'unix'; path: string } | { kind: 'tcp'; host: string; port: number } = DEFAULT_DESCRIPTOR,
+): BridgeCall[] {
   const calls: BridgeCall[] = [];
   const fakeBridge = {
     callWithOptions: async (
@@ -80,18 +100,17 @@ function installFakeBridge(result: unknown = 'ok'): BridgeCall[] {
       return result;
     },
   };
-  // BridgeManager is now Map-keyed by descriptor. Seed the entry for the
-  // default unix path that makeCtx's resolveTransport picks when no
-  // credential is declared on the fake node.
+  // BridgeManager is Map-keyed by descriptor. Seed the entry for the path
+  // transport-resolver will pick (default unix, or the credential's tcp/unix).
   const mgr = BridgeManager.getInstance() as unknown as {
     entries: Map<string, unknown>;
   };
-  mgr.entries.set(DEFAULT_DESCRIPTOR_KEY, {
+  mgr.entries.set(descriptorKey(descriptor), {
     bridge: fakeBridge,
     pendingClose: null,
     refCount: 0,
     methodRefs: new Map(),
-    descriptor: { kind: 'unix', path: '/var/run/arduino-router.sock' },
+    descriptor,
   });
   return calls;
 }
@@ -165,6 +184,37 @@ describe('UnoQTool.execute', () => {
       const ctx = makeCtx([{}, {}, {}, {}, {}], {});
       await run(ctx);
       expect(calls).toHaveLength(5);
+    });
+
+    it('keys the counter by credentialId so re-pointing a node starts fresh budget', async () => {
+      // Same node.id and same method, two different credentials pointing at
+      // two different Qs. §12.4: the counter must not carry the old Q's call
+      // history into the new target. Saturate credential A's bucket, then
+      // confirm credential B still has its full budget.
+      const descriptorA = { kind: 'tcp' as const, host: 'kitchen', port: 5775 };
+      const descriptorB = { kind: 'tcp' as const, host: 'garage', port: 5775 };
+      const callsA = installFakeBridge('ok', descriptorA);
+      const callsB = installFakeBridge('ok', descriptorB);
+
+      const ctxA = makeCtx([{}, {}, {}], { rateLimit: { maxCalls: 2, window: 'minute' } }, 'node-x', {
+        id: 'cred-kitchen',
+        data: { transport: 'tcp', host: descriptorA.host, port: descriptorA.port },
+      });
+      const outA = await run(ctxA);
+      expect(outA[0].json.result).toBe('ok');
+      expect(outA[1].json.result).toBe('ok');
+      expect(outA[2].json.refused).toBe(true);
+      expect(callsA).toHaveLength(2);
+
+      const ctxB = makeCtx([{}, {}], { rateLimit: { maxCalls: 2, window: 'minute' } }, 'node-x', {
+        id: 'cred-garage',
+        data: { transport: 'tcp', host: descriptorB.host, port: descriptorB.port },
+      });
+      const outB = await run(ctxB);
+      expect(outB[0].json.result).toBe('ok');
+      expect(outB[1].json.result).toBe('ok');
+      expect(outB.every((r) => !r.json.refused)).toBe(true);
+      expect(callsB).toHaveLength(2);
     });
   });
 
