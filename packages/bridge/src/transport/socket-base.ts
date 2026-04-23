@@ -1,9 +1,10 @@
 /**
  * SocketTransport — shared implementation for net.Socket-backed transports.
  *
- * Both UnixSocketTransport and TcpTransport differ only in how the net.Socket
- * is created. The rest — promise-based connect, data/close/error wiring,
- * write(), graceful close — is identical and lives here.
+ * UnixSocketTransport, TcpTransport, and TlsTransport differ only in how the
+ * socket is created and which event signals readiness. The rest — promise-
+ * based connect, data/close/error wiring, write(), graceful close — is
+ * identical and lives here.
  */
 import { EventEmitter } from 'node:events';
 import net from 'node:net';
@@ -15,12 +16,25 @@ export abstract class SocketTransport extends EventEmitter implements Transport 
   /** Build a fresh net.Socket for a (re)connection. Each subclass supplies its own connect args. */
   protected abstract createSocket(): net.Socket;
 
+  /**
+   * The socket event that signals "ready to carry user data."
+   *
+   * - Plain TCP / unix → 'connect' (TCP handshake complete).
+   * - TLS             → 'secureConnect' (TLS handshake complete). 'connect'
+   *                     fires earlier, before the handshake — writing at that
+   *                     point would put plaintext bytes onto the wire.
+   */
+  protected readyEvent(): string {
+    return 'connect';
+  }
+
   connect(): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       const socket = this.createSocket();
+      const readyEvent = this.readyEvent();
       let settled = false;
 
-      const onConnect = () => {
+      const onReady = () => {
         if (settled) return;
         settled = true;
         socket.off('error', onError);
@@ -32,14 +46,14 @@ export abstract class SocketTransport extends EventEmitter implements Transport 
       const onError = (err: Error) => {
         if (settled) return;
         settled = true;
-        socket.off('connect', onConnect);
+        socket.off(readyEvent, onReady);
         // Destroy so the OS socket is released; no 'close' will be forwarded
         // (we haven't wired stream handlers yet).
         socket.destroy();
         reject(err);
       };
 
-      socket.once('connect', onConnect);
+      socket.once(readyEvent, onReady);
       socket.once('error', onError);
     });
   }

@@ -5,20 +5,31 @@
  *   - "router / Node-to-Node" — only need the router running, no specific MCU sketch
  *   - "MCU (integration-test.ino)" — require sketches/integration-test.ino to be flashed
  *
- * Each group runs once per transport configured via env vars. Both variables
- * can be set simultaneously to exercise both transports in one run.
+ * Each group runs once per transport configured via env vars. Multiple env
+ * var sets can be populated simultaneously to exercise all three transports
+ * in one run.
  *
  *   A. Unix socket (default, legacy) — SSH-tunnel the router socket to the PC:
  *        rm -f /tmp/arduino-router.sock
  *        ssh -N -L /tmp/arduino-router.sock:/var/run/arduino-router.sock arduino@linucs.local &
  *        UNOQ_SOCKET=/tmp/arduino-router.sock npm run test:integration -w packages/bridge
  *
- *   B. TCP (for the Variant A relay container — CONTEXT.md §12.5.1, §12.7 step 1):
- *        On the Q:  cd ~/n8n/relay && docker compose up -d
+ *   B. TCP (Variant A relay — CONTEXT.md §12.5.1, §12.7 step 1):
+ *        On the Q:  cd ~/relay && docker compose up -d
  *        On the PC: ssh -N -L 5775:localhost:5775 arduino@linucs.local &
- *                   UNOQ_TCP_HOST=127.0.0.1 UNOQ_TCP_PORT=5775 npm run test:integration -w packages/bridge
+ *                   UNOQ_TCP_HOST=127.0.0.1 UNOQ_TCP_PORT=5775 \
+ *                     npm run test:integration -w packages/bridge
+ *
+ *   C. TLS (Variant C mTLS relay — CONTEXT.md §12.5.3):
+ *        On the PC, after running the pki scripts:
+ *          UNOQ_TLS_HOST=127.0.0.1 UNOQ_TLS_PORT=5775 \
+ *          UNOQ_TLS_CA=deploy/relay-mtls/pki/out/n8n/laptop/ca.pem \
+ *          UNOQ_TLS_CERT=deploy/relay-mtls/pki/out/n8n/laptop/client.pem \
+ *          UNOQ_TLS_KEY=deploy/relay-mtls/pki/out/n8n/laptop/client.key \
+ *          npm run test:integration -w packages/bridge
  */
 import { describe, it, expect, afterEach } from 'vitest';
+import fs from 'node:fs';
 import { Bridge } from '../src/index.js';
 import type { ConnectOptions } from '../src/index.js';
 
@@ -47,11 +58,37 @@ if (process.env.UNOQ_TCP_HOST && process.env.UNOQ_TCP_PORT) {
   });
 }
 
+if (
+  process.env.UNOQ_TLS_HOST &&
+  process.env.UNOQ_TLS_PORT &&
+  process.env.UNOQ_TLS_CA &&
+  process.env.UNOQ_TLS_CERT &&
+  process.env.UNOQ_TLS_KEY
+) {
+  // Read cert files synchronously at test-module load time. If any path is
+  // wrong, the thrown ENOENT surfaces before the test even registers, which
+  // is the clearest failure signal for an integration config error.
+  transports.push({
+    name: 'tls',
+    opts: {
+      transport: {
+        kind: 'tls',
+        host: process.env.UNOQ_TLS_HOST,
+        port: Number(process.env.UNOQ_TLS_PORT),
+        ca: fs.readFileSync(process.env.UNOQ_TLS_CA, 'utf-8'),
+        cert: fs.readFileSync(process.env.UNOQ_TLS_CERT, 'utf-8'),
+        key: fs.readFileSync(process.env.UNOQ_TLS_KEY, 'utf-8'),
+      },
+      reconnect: { enabled: false },
+    },
+  });
+}
+
 // Emit a skip marker when no transport is configured so the file still
 // registers with Vitest. Without this, the file looks empty.
 if (transports.length === 0) {
   describe.skip('integration', () => {
-    it('set UNOQ_SOCKET and/or UNOQ_TCP_HOST+UNOQ_TCP_PORT to run', () => {});
+    it('set UNOQ_SOCKET, UNOQ_TCP_HOST+UNOQ_TCP_PORT, or UNOQ_TLS_* to run', () => {});
   });
 }
 

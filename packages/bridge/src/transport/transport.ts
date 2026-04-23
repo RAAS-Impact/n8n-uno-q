@@ -20,7 +20,20 @@ import type { EventEmitter } from 'node:events';
 /** Canonical description of a transport endpoint. */
 export type TransportDescriptor =
   | { kind: 'unix'; path: string }
-  | { kind: 'tcp'; host: string; port: number };
+  | { kind: 'tcp'; host: string; port: number }
+  /**
+   * TLS with client-certificate authentication (mTLS). ca/cert/key are PEM
+   * strings. Used to reach a remote UNO Q via the Variant C stunnel relay
+   * when the LAN is untrusted. See CONTEXT.md §12.5.3.
+   */
+  | {
+      kind: 'tls';
+      host: string;
+      port: number;
+      ca: string;
+      cert: string;
+      key: string;
+    };
 
 export interface Transport extends EventEmitter {
   /**
@@ -40,5 +53,17 @@ export interface Transport extends EventEmitter {
 
 /** A short human-readable description of a descriptor, useful for logs and keying. */
 export function describeTransport(d: TransportDescriptor): string {
-  return d.kind === 'unix' ? `unix:${d.path}` : `tcp:${d.host}:${d.port}`;
+  switch (d.kind) {
+    case 'unix':
+      return `unix:${d.path}`;
+    case 'tcp':
+      return `tcp:${d.host}:${d.port}`;
+    case 'tls':
+      // Distinct prefix from 'tcp' so BridgeManager treats tcp://host:port and
+      // tls://host:port as separate connections (they are — one is plaintext,
+      // the other mTLS). Cert material is intentionally excluded from the key
+      // so credential edits that rotate keys but keep the same endpoint don't
+      // pointlessly churn the connection pool.
+      return `tls:${d.host}:${d.port}`;
+  }
 }

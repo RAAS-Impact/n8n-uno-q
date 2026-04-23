@@ -16,5 +16,15 @@ export type {
 } from './bridge.js';
 export { BridgeError, TimeoutError, ConnectionError, MethodNotAvailableError } from './errors.js';
 export type { Transport, TransportDescriptor } from './transport/index.js';
-export { describeTransport, createTransport, UnixSocketTransport, TcpTransport } from './transport/index.js';
-export type { UnixSocketTransportOptions, TcpTransportOptions } from './transport/index.js';
+export {
+  describeTransport,
+  createTransport,
+  UnixSocketTransport,
+  TcpTransport,
+  TlsTransport,
+} from './transport/index.js';
+export type {
+  UnixSocketTransportOptions,
+  TcpTransportOptions,
+  TlsTransportOptions,
+} from './transport/index.js';

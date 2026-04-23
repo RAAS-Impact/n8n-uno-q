@@ -997,9 +997,17 @@ openssl x509 -req -in n8n-laptop.csr -CA ca.pem -CAkey ca.key -CAcreateserial \
 
 **Bridge / n8n-side impact** (not yet implemented):
 
-- `TcpTransport` extends (or a sibling `TlsTransport` is added) to call `tls.connect({ host, port, ca, cert, key })` instead of plain `net.createConnection`. Transport events stay identical; Bridge's reconnect loop is unchanged.
-- `UnoQRouterApi` credential grows three optional fields (`caCert`, `clientCert`, `clientKey`) shown only when `transport === 'tcp'`. When populated, the descriptor becomes `{ kind: 'tcp', host, port, tls: { ca, cert, key } }`; when empty, the current plain-TCP descriptor is used.
-- No change to any node's behaviour beyond the descriptor carrying tls material transparently.
+- **Sibling `TlsTransport` class**, not an extension of `TcpTransport`. Both extend the shared `socket-base.ts` and call `tls.connect({ host, port, ca, cert, key })` vs `net.createConnection(...)` respectively. Decision (2026-04-23, overrides the earlier draft that nested `tls` inside a `kind: 'tcp'` descriptor): keep the two transports as peers so each class has a single responsibility and consumers (factory, describeTransport, BridgeManager keying) switch cleanly on `kind` without an "is TLS configured?" branch. Transport events stay identical; Bridge's reconnect loop is unchanged.
+- **`TransportDescriptor` union gains a third variant** — distinct `kind: 'tls'`:
+  ```ts
+  export type TransportDescriptor =
+    | { kind: 'unix'; path: string }
+    | { kind: 'tcp';  host: string; port: number }
+    | { kind: 'tls';  host: string; port: number; ca: string; cert: string; key: string };
+  ```
+- **`describeTransport` keys TLS distinctly from plain TCP** (`tls:host:port` vs `tcp:host:port`), so BridgeManager's connection dedup keeps TLS and plaintext connections to the same endpoint separate.
+- **`UnoQRouterApi` credential gains a "Use TLS (mTLS)" boolean** (default off) shown only when `transport === 'tcp'`. When that toggle is on, three *required* multi-line cert fields appear: `caCert`, `clientCert`, `clientKey`. When off, the three fields are hidden and the descriptor resolves to `{ kind: 'tcp', host, port }`; when on, it resolves to `{ kind: 'tls', host, port, ca, cert, key }`. Decision (2026-04-23): the explicit toggle over inferred-from-presence — beginners don't have to understand "three empty fields mean no TLS", and the UI makes the mode visible at a glance.
+- No change to any node's behaviour beyond the descriptor carrying TLS material transparently.
 
 **Open items for Variant C:**
 

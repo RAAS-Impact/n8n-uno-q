@@ -52,6 +52,25 @@ const bridge = await Bridge.connect({
 
 The TCP endpoint is typically the `socat` relay container shipped in this repo ([`deploy/relay/`](https://github.com/raas-impact/n8n-uno-q/tree/main/deploy/relay)) running on the Q. It bind-mounts `/var/run/arduino-router.sock` and re-exposes it as plain TCP. No authentication, no transport encryption — only deploy on a trusted network.
 
+### Remote — TLS (mTLS)
+
+```ts
+import { readFileSync } from 'node:fs';
+
+const bridge = await Bridge.connect({
+  transport: {
+    kind: 'tls',
+    host: 'myq.local',
+    port: 5775,
+    ca:   readFileSync('ca.pem',     'utf-8'),
+    cert: readFileSync('client.pem', 'utf-8'),
+    key:  readFileSync('client.key', 'utf-8'),
+  },
+});
+```
+
+Use TLS when the LAN is untrusted. The endpoint is typically the `stunnel` relay container shipped in this repo ([`deploy/relay-mtls/`](https://github.com/raas-impact/n8n-uno-q/tree/main/deploy/relay-mtls)), which requires a client certificate signed by the CA the server trusts. The [`pki` wrapper](https://github.com/raas-impact/n8n-uno-q/tree/main/deploy/relay-mtls/pki) in the same directory issues the CA, server, and client certs with one command each — `./pki add n8n laptop` produces the three PEM files this transport reads. Only the server cert's handshake path completes; any client missing or misconfigured is rejected at `secureConnect` time.
+
 ## API
 
 ### `Bridge.connect(opts?)`
@@ -179,7 +198,12 @@ volumes:
 Advanced callers can construct transports directly:
 
 ```ts
-import { Bridge, UnixSocketTransport, TcpTransport } from '@raasimpact/arduino-uno-q-bridge';
+import {
+  Bridge,
+  UnixSocketTransport,
+  TcpTransport,
+  TlsTransport,
+} from '@raasimpact/arduino-uno-q-bridge';
 
 const bridge = await Bridge.connect({
   transportInstance: new TcpTransport({ host: 'myq.local', port: 5775 }),
