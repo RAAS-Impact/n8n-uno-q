@@ -24,11 +24,81 @@ That's it. Each `add` command prints exactly which files to copy where.
 | Command | What it does |
 |---|---|
 | `./pki setup` | Creates your home CA (the "root identity" that signs everything else). Run once. |
-| `./pki add device <nick> [--hostname H] [--ip I]` | Issues a **server** cert for a Q. By default binds to `<nick>.local` (mDNS); pass `--hostname`/`--ip` if your LAN needs something different. |
+| `./pki add device <nick> [--hostname H] [--ip I]` | Issues a **server** cert for a Q. Default hostname is `<nick>.local` — see [Picking the right hostname (or IP) for a device](#picking-the-right-hostname-or-ip-for-a-device) below for when to override with `--hostname` / `--ip`. |
 | `./pki add n8n <nick>` | Issues a **client** cert for an n8n instance. |
 | `./pki list` | Shows all active certs and their expiry dates. |
+| `./pki show <nick> [-v]` | Shows details (subject, issuer, SAN, EKU, expiry, SHA-256 fingerprint) of one cert. Use `ca` for the home CA. Add `-v` for the full `openssl x509 -text` dump. |
 | `./pki remove <nick>` | Deletes the cert files and marks the entry removed in the ledger. |
 | `./pki help` | Prints help. |
+
+## Picking the right hostname (or IP) for a device
+
+When you issue a device cert, you're stamping it with a name — whatever the n8n side will type into the **Host** field later. TLS requires an exact match: if n8n connects using name *X* and the cert says *Y*, the connection is rejected with `certificate verify failed`. So decide how n8n will reach the Q first, then issue a cert that matches.
+
+### The default — `<nick>.local`
+
+```bash
+./pki add device kitchen
+```
+
+This stamps the cert with `kitchen.local`. Most home networks support this out of the box thanks to **mDNS** — a "find devices on your LAN by name" system that ships with macOS, modern Windows, and Linux (via `avahi-daemon`). You don't have to configure anything.
+
+**Quick test:** on the machine that will run n8n, run `ping kitchen.local`. If it replies, the default will work and you can skip the flags.
+
+### When to use `--hostname`
+
+Use it if n8n will reach the Q by some name other than `<nick>.local`:
+
+```bash
+./pki add device kitchen --hostname kitchen.home.lan
+```
+
+Typical reasons:
+- A custom DNS name you've set up on your router or home DNS (e.g. `kitchen.home.lan`, `k.mynet.example`).
+- mDNS doesn't work on your network (some corporate or guest Wi-Fi networks block it; some ISPs' routers don't support it).
+- You want a different nickname in the cert than in the n8n credential.
+
+### When to use `--ip`
+
+Use it if n8n will reach the Q by IP address:
+
+```bash
+./pki add device kitchen --ip 192.168.1.42
+```
+
+Typical reasons:
+- Your network doesn't do names at all — you connect by IP.
+- You're SSH-tunneling for dev, so n8n's Host field says `127.0.0.1` (note: requires `--ip 127.0.0.1` for the tunneled setup to verify).
+- You want belt-and-braces: the Q always answers the same IP even if DNS is flaky.
+
+### When to use both
+
+If you'll sometimes connect by name and sometimes by IP, pass both. TLS will accept either when it matches the Host field:
+
+```bash
+./pki add device kitchen --hostname kitchen.home.lan --ip 192.168.1.42
+```
+
+### Decision table
+
+| How n8n will reach the Q | What to run |
+|---|---|
+| `kitchen.local` (default, mDNS works) | `./pki add device kitchen` |
+| `kitchen.home.lan` or another custom name | `./pki add device kitchen --hostname kitchen.home.lan` |
+| `192.168.1.42` (IP only) | `./pki add device kitchen --ip 192.168.1.42` |
+| Sometimes name, sometimes IP | `./pki add device kitchen --hostname kitchen.home.lan --ip 192.168.1.42` |
+| `127.0.0.1` via SSH tunnel (dev) | `./pki add device kitchen --ip 127.0.0.1` |
+
+### If you got it wrong
+
+The symptom is n8n's **Test Connection** button showing `certificate verify failed`. The fix is to remove the bad cert and re-issue with the right flags:
+
+```bash
+./pki remove kitchen
+./pki add device kitchen --hostname kitchen.local --ip 192.168.1.42
+```
+
+Then redeploy the relay on the Q so it picks up the new server cert (see the [relay-mtls install instructions](..#install)).
 
 ## What gets created
 
@@ -120,12 +190,16 @@ You pasted the **wrong** `ca.pem` into the credential (or forgot to paste one). 
 
 ### n8n's Test Connection says "certificate verify failed"
 
-Usually a hostname mismatch: the Q's server cert was issued with `--hostname kitchen.local` but the credential's **Host** field says `192.168.1.42`. Either change the credential to match the SAN, or re-issue the device cert with an IP SAN:
+A hostname mismatch: the cert was stamped with one name/IP, but n8n's **Host** field says something different. See [Picking the right hostname](#picking-the-right-hostname-or-ip-for-a-device) above for the full explanation.
+
+Quick fix — re-issue the cert with a name/IP that matches what n8n will actually use:
 
 ```bash
 ./pki remove kitchen
 ./pki add device kitchen --hostname kitchen.local --ip 192.168.1.42
 ```
+
+Or, easier if you don't want to re-issue: change the n8n credential's Host field to match whatever the cert was originally issued with (`./pki show kitchen` prints it).
 
 ### `./pki` says `openssl not found`
 

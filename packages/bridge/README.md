@@ -89,7 +89,8 @@ Returns a connected `Bridge` instance.
 ```ts
 type TransportDescriptor =
   | { kind: 'unix'; path: string }
-  | { kind: 'tcp'; host: string; port: number };
+  | { kind: 'tcp';  host: string; port: number }
+  | { kind: 'tls';  host: string; port: number; ca: string; cert: string; key: string };
 ```
 
 ### `bridge.call(method, ...params)`

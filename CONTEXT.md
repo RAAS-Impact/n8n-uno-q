@@ -550,12 +550,13 @@ Router version at time of testing: **0.8.0**.
 - **License:** MIT (revisit if Arduino's GPL router imposes anything on a protocol-level client — it shouldn't, but worth a quick legal sanity check before first publish).
 - **Update this file** whenever a decision changes. Don't let it go stale. Procedures, commands, and style conventions live in [CLAUDE.md](CLAUDE.md); update them there.
 - **Priority (2026-04-22):** multi-Q **Variant A** (§12, steps 1–3: socat relay + Bridge HAL refactor + UnoQRouterApi credentials) takes precedence over the Arduino Cloud package (§13). Rationale: Variant A is bounded, delivers real value today (remote single-Q access from any n8n instance), and forces two architectural improvements — centralised credentials and a swappable Transport layer — that the project needs regardless of multi-Q. Arduino Cloud integration has a weaker demand signal (the official Node-RED equivalent has minimal adoption) and is deferred until Variant A ships. Multi-Q Variant B (Tailscale overlay, §12.5.2) remains lower priority. `feat/multi-q` branch is the working branch; §12 is the authoritative spec.
+- **Update (2026-04-23):** Variant A **and** Variant C (§12.5.3 — stunnel + mTLS) are both shipped and verified end-to-end on real hardware. Variant C's PKI wrapper (`deploy/relay-mtls/pki/`) closes the "untrusted network" gap that Variant B was also meant to address. **Variant B is therefore downgraded from an active spec to future work.** The design in §12.5.2 stays on record for the two audiences where it still beats C (existing Tailscale users; large fleets where per-device cert management becomes tedious). The working branch after these changes returns to making the Arduino Cloud package (§13) the next strategic priority.
 
 ---
 
 ## 12. Multi-Q support
 
-**Status:** designed on the `feat/multi-q` branch as of 2026-04-21. **Active — Variant A is current priority** (see §11). Not yet implemented. This section is the authoritative spec — start here when picking up the feature.
+**Status (2026-04-23):** Variants A and C implemented on `feat/multi-q` and verified against real hardware (mTLS handshake + msgpack-rpc round-trip green over `linucs.local:5775`). Variant B (Tailscale) deferred as future work — see §11 priority update. This section remains the authoritative spec for the whole multi-Q story; pick it up here regardless of which variant you're extending.
 
 ### 12.1 Motivation
 
@@ -569,7 +570,9 @@ Neither scenario is supported by today's single-socket-same-host design.
 
 ### 12.2 Architecture: WireGuard-mesh overlay + relay container
 
-The identity + transport layer is a **WireGuard-based mesh overlay**, with **Tailscale as the default implementation** — a deployment choice, not a lock-in. See §12.2.2 for alternatives we evaluated and their swap-out cost, and §12.5.2's "Swapping the overlay" for the mechanics. The rest of this section describes the default; anywhere the text says "Tailscale" or "`tailscaled`", read that as "the mesh-overlay client of your choice."
+**Status (2026-04-23):** the section below is the original design contemplating a WireGuard overlay (Variant B / Tailscale) as the production transport. What actually shipped is Variant A (trusted LAN, no overlay) plus Variant C (mTLS over plain TCP, no overlay). The overlay narrative here is preserved because it's the natural path if Variant B is ever revisited — §12.5.2 holds the deferred implementation spec, and §12.2.2 the overlay-choice analysis.
+
+The identity + transport layer *would be* a **WireGuard-based mesh overlay**, with **Tailscale as the default implementation** — a deployment choice, not a lock-in. See §12.2.2 for alternatives we evaluated and their swap-out cost, and §12.5.2's "Swapping the overlay" for the mechanics. The rest of this section describes that default; anywhere the text says "Tailscale" or "`tailscaled`", read that as "the mesh-overlay client of your choice."
 
 Three pieces, landing together:
 
@@ -616,7 +619,9 @@ The following alternatives were evaluated during design and rejected. Don't reli
 
 ### 12.2.2 Overlay implementation — Tailscale default, alternatives in scope
 
-The §12.2 architecture commits to a WireGuard-based mesh overlay as the identity+transport layer. This subsection captures the alternatives we evaluated for that slot, why Tailscale is the default, and what we'd switch to under what conditions.
+**Status (2026-04-23):** kept on record as the intended overlay for Variant B (§12.5.2), which is now deferred. The shipping multi-Q implementation uses Variants A (plain socat on a trusted LAN) and C (stunnel + mTLS for untrusted networks), neither of which needs a WireGuard overlay. If Variant B is ever picked up, the analysis below is the starting point — Tailscale remains the preferred choice.
+
+The §12.2 architecture *originally* committed to a WireGuard-based mesh overlay as the identity+transport layer. This subsection captures the alternatives we evaluated for that slot, why Tailscale was the default, and what we'd switch to under what conditions.
 
 **Why a WireGuard-based mesh VPN rather than an application-layer zero-trust overlay?** For our case, identity verification happens at **credential-selection time** in the n8n UI ("which Q does this node target?"), not at runtime inside a workflow. Once a user has picked "Kitchen Q" as the credential, the bridge just opens a TCP socket — no per-request identity check is needed. A mesh VPN authenticates at the network layer (no valid peer key → no route), which is exactly enough for this model. Application-layer zero-trust adds value only when each call needs its own identity assertion — which we don't.
 
@@ -763,11 +768,11 @@ export class UnoQRouterApi implements ICredentialType {
 
 ### 12.5 Relay container
 
-**Role:** exposes `arduino-router`'s unix socket as a TCP endpoint, optionally wrapped in a Tailscale overlay. Runs on each satellite Q. Installed by the user via `docker compose`, same muscle memory as the n8n container. If not installed, the Q stays exactly as it is today — router reachable only via the local unix socket.
+**Role:** exposes `arduino-router`'s unix socket as a TCP endpoint, optionally wrapped in a mesh-overlay. Runs on each satellite Q. Installed by the user via `docker compose`, same muscle memory as the n8n container. If not installed, the Q stays exactly as it is today — router reachable only via the local unix socket.
 
-**Lives under [deploy/relay/](deploy/relay/)** (to be created) alongside the existing `deploy/docker-compose.yml`.
+**Lives under [deploy/relay/](deploy/relay/) (Variant A) and [deploy/relay-mtls/](deploy/relay-mtls/) (Variant C).** Both are alongside the existing [deploy/n8n/](deploy/n8n/) compose service.
 
-**Three variants, mutually exclusive at the port level but complementary in intent**:
+**Three variants, mutually exclusive at the port level but complementary in intent** — A and C shipped as of 2026-04-23; B is designed-but-deferred (see §12.5.2 status note):
 
 - **Variant A — socat-only.** Minimal image: `alpine` + `socat`. Exposes the router's unix socket as a TCP listener bound to an arbitrary interface (loopback, LAN, or anything). No auth, no identity, nothing but byte-pumping. **Useful on its own** for a trusted-LAN setup and as the target the bridge HAL + credentials (§12.7 step 2) are developed against. Binding is controlled by the `UNOQ_RELAY_BIND` env var (default `0.0.0.0` — public on the host's LAN; set to `127.0.0.1` for loopback-only + SSH reverse-tunnel consumers).
 - **Variant B — socat + Tailscale.** Adds `tailscaled` on top, so the TCP endpoint is reachable only from devices in the owner's tailnet. Network-layer authentication for untrusted networks. Everything except the enrollment UX and the network-layer transport is identical to Variant A.
@@ -824,7 +829,9 @@ unoq-relay:
 
 This is the whole dev loop for the bridge HAL + credentials work. No Tailscale involved yet.
 
-#### 12.5.2 Variant B — socat + Tailscale (step 3 deliverable)
+#### 12.5.2 Variant B — socat + Tailscale
+
+**Status (2026-04-23): deferred as future work.** Variant A + Variant C together cover the audience this design was meant to serve: A for trusted LANs, C for untrusted networks without a third-party dependency. Variant B retains narrow appeal for (a) users who already run a tailnet and want zero per-device PKI, and (b) large fleets (~20+ devices) where individual cert management becomes tedious. The design below is kept on record so that future work can pick it up against a known spec; no implementation lives under `deploy/` today.
 
 **Dockerfile (conceptual):** build on Variant A's entrypoint, swap the base image for Tailscale's, add the tailscaled bootstrap.
 
@@ -1066,28 +1073,30 @@ Captured here so they don't have to be re-researched. All verified against `ardu
 
 ### 12.7 Implementation order
 
-Target sequence for landing on `feat/multi-q`. Each step should be independently reviewable and leave the tree green. The order is deliberately **socat container first → bridge + n8n against it → Tailscale layered on top**, because it isolates each concern:
+Target sequence for landing on `feat/multi-q`. Each step was independently reviewable and left the tree green. The as-delivered order was **socat container → bridge HAL + credentials → mTLS relay → PKI wrapper + installers**, driven by "isolate each concern, ship usable slices":
 
-- Step 1 validates the socket-proxy approach in isolation, before any bridge changes exist.
-- Step 2 develops the bridge HAL + credentials against a stable TCP target on a trusted LAN — no networking overlay in the picture.
-- Step 3 adds Tailscale last, and only changes the hostname the credential points at. If the bridge works over LAN TCP (step 2), Tailscale is a pure overlay that can't break the RPC layer.
+- Step 1 validated the socket-proxy approach in isolation, before any bridge changes existed.
+- Step 2 developed the bridge HAL + credentials against a stable TCP target on a trusted LAN — no networking overlay.
+- Step 3 added mTLS (Variant C). From n8n's perspective this is still a TCP connection to a hostname, so nothing from step 2 regressed; only the cert material in the credential changed.
+- Step 4 wrapped the PKI behind a beginner-friendly CLI + install/uninstall scripts + SSH multiplexing so password-auth users don't get five prompts per deploy.
 
-Each step is also shippable on its own — a release containing only steps 1–3 is already useful to anyone operating a trusted LAN and doesn't force Tailscale onto them.
+Each slice is also useful on its own — a release containing only steps 1–2 already served anyone with a trusted LAN.
 
-1. **Variant A relay container — socat only** (§12.5.1). Build the minimal image under [deploy/relay/](deploy/relay/), `docker compose up -d` alongside the existing n8n container on the Q. Test by hand: SSH-forward the TCP port to the PC, run a one-shot msgpack-rpc script against it (e.g. an adapted [experiments/test-router.mjs](experiments/test-router.mjs) pointed at TCP) and confirm `$/version` round-trips. **Deliverable:** a published image (`ghcr.io/raasimpact/unoq-relay`) and a compose fragment. Usable on its own by anyone with a trusted LAN.
-2. **Bridge HAL refactor** (§12.3). Extract `Transport` interface, migrate unix-socket logic into `UnixSocketTransport`, add `TcpTransport`. Preserve existing `Bridge.connect({ socket })` shape via an internal adapter. Unit tests green on both transports using a transport-agnostic `MockTransport`. TCP integration tests gated on `UNOQ_TCP_HOST` / `UNOQ_TCP_PORT`, pointed at step 1's relay container via the SSH-forward.
-3. **`UnoQRouterApi` credentials + node wiring** (§12.4). Credential class with `test` function, node `credentials:` declaration on all four nodes, `BridgeManager` keying change, rate-limiter key update. Backwards-compat shim for inline `socketPath` with a deprecation warning. Validate end-to-end by running n8n on the PC with a credential pointing at step 1's container (transport=tcp, host=127.0.0.1 via SSH-forward) and exercising every node type — Call, Trigger (both modes), Respond, Method.
-4. **Variant B relay container — add Tailscale** (§12.5.2). Extend the step-1 image to `FROM tailscale/tailscale`, wire `tailscaled` + `tailscale serve` into the entrypoint, add the production compose fragment with `NET_ADMIN` / `/dev/net/tun` / state volume. Smoke-test: enrol one Q in a tailnet, change the n8n credential's host from loopback to `uno-q.tailnet-abc.ts.net`, confirm the same workflow keeps working end-to-end. **The transport from n8n's perspective does not change** — it's still a TCP connection to a hostname. Everything validated in step 3 continues to work; only the route the packets take differs.
-5. **Docs + examples**. Top-level README "Multi-Q setup" section covering both variants (trusted-LAN with Variant A, untrusted networks with Variant B), update to [CLAUDE.md § Dev loop / Troubleshooting](CLAUDE.md) for the relay container's role and new failure modes (container stopped, tailnet disconnected, auth key expired), example workflow under `examples/multi-q/` referencing two credentials.
+1. **Variant A relay container — socat only** (§12.5.1) — **shipped.** Image under [deploy/relay/](deploy/relay/); install/uninstall scripts at [deploy/relay/install.sh](deploy/relay/install.sh) and [deploy/relay/uninstall.sh](deploy/relay/uninstall.sh).
+2. **Bridge HAL refactor + `UnoQRouterApi` credentials + node wiring** (§12.3, §12.4) — **shipped.** `Transport` interface, `UnixSocketTransport` + `TcpTransport`, `BridgeManager` re-keyed by descriptor, rate-limiter key includes `credentialId`, legacy `socketPath` fallback with one-release deprecation.
+3. **Variant C relay container — stunnel + mTLS** (§12.5.3) — **shipped and verified on real hardware (2026-04-23).** `TlsTransport` sibling to `TcpTransport`, `TransportDescriptor` gained `kind: 'tls'`, `UnoQRouterApi` gained "Use TLS (mTLS)" toggle + three PEM fields. Image + compose under [deploy/relay-mtls/](deploy/relay-mtls/).
+4. **PKI tooling + installers** (§12.5.3 open item: "PKI bootstrap UX") — **shipped.** [deploy/relay-mtls/pki/](deploy/relay-mtls/pki/) wraps openssl behind `./pki setup | add device | add n8n | list | show | remove`. [deploy/relay-mtls/install.sh](deploy/relay-mtls/install.sh) consumes the generated bundles. SSH multiplexing ([deploy/lib/ssh-multiplex.sh](deploy/lib/ssh-multiplex.sh)) collapses password-auth prompts to one per invocation; sync.sh retrofitted accordingly.
+5. **Variant B relay container — add Tailscale** (§12.5.2) — **deferred as future work.** See §11 priority note (2026-04-23). Design retained in §12.5.2 for the two audiences where Tailscale still beats mTLS (existing tailnet users; fleet sizes where per-device certs are operationally heavy). No implementation under `deploy/` today.
+6. **Docs + examples** — *partial.* Per-variant READMEs under [deploy/relay/](deploy/relay/) and [deploy/relay-mtls/](deploy/relay-mtls/); [pki/README.md](deploy/relay-mtls/pki/README.md). Still pending: top-level README "Multi-Q setup" chapter, [CLAUDE.md](CLAUDE.md) troubleshooting entries for the mTLS failure modes discovered during hardware verification (stunnel inline-comment parsing, `verifyPeer` vs `verifyChain`, TLS-host-must-match-cert-SAN), example workflow under `examples/multi-q/` with two credentials.
 
 ### 12.8 Open items
 
 - **Arduino's roadmap for `--listen-port` auth.** File a question on `arduino/arduino-router` asking whether the TCP listener is a supported production interface and whether TLS / client-cert auth is on the roadmap. If yes, there may eventually be a simpler v2.1 path that drops the relay container in favour of the router's native TLS — unlikely near-term, worth on record. Draft of the question lives in the `feat/multi-q` thread history.
-- **Relay container on the Q's actual Docker runtime.** Validate empirically that `network_mode: host` + `cap_add: [NET_ADMIN, NET_RAW]` + `/dev/net/tun` are accepted for Variant B. If not, fall back to `TS_USERSPACE=1` (userspace WireGuard, slower but fewer host requirements). Variant A has no such requirements and should run on any Docker.
-- **Ventuno Q availability.** If/when the Ventuno Q ships, re-verify the relay container runs on its hardware (same Docker stack expected) and that the orchestrator side works too (likely runs a native `tailscaled` on the host rather than the relay container, but worth confirming; the orchestrator doesn't need the socat half because its own arduino-router is local).
-- **Multiple-Q authoring UX.** Once credentials land, check the node-picker and credential dropdown don't feel clunky with 5+ credentials defined. Possibly worth interpolating credential name into node display when a credential is bound, so canvas reads "Kitchen Q · Call" rather than just "Call".
+- **Ventuno Q availability.** If/when the Ventuno Q ships, re-verify Variants A and C run on its hardware (same Docker stack expected).
+- **Multiple-Q authoring UX.** With credentials landed, check the node-picker and credential dropdown don't feel clunky once a user has 5+ credentials defined. Possibly worth interpolating credential name into node display when a credential is bound, so canvas reads "Kitchen Q · Call" rather than just "Call".
 - **Queue-mode incompatibility still stands.** Multi-Q does nothing to fix it (§6 singleton-client note remains). Flag in docs; both the singleton and the rate limiter remain per-process.
-- **Auth key rotation UX.** What happens when a Tailscale auth key expires and the relay container restarts? The state volume persists the node identity, so normal restarts don't re-auth. A full device-key rotation flow is a Tailscale admin action and out of scope — but the relay container's docs should point at it.
+- **CRL / hard-revocation for Variant C.** Small fleets can re-bootstrap the CA to revoke; fleets large enough to find that painful are the same fleets that would be better served by Variant B. Not worth wiring CRL distribution through stunnel for the MVP audience.
+- **Future-work-only (Variant B, if revisited):** Validate empirically that `network_mode: host` + `cap_add: [NET_ADMIN, NET_RAW]` + `/dev/net/tun` are accepted on the Q's Docker runtime, with `TS_USERSPACE=1` as the fallback; auth-key rotation UX when a relay container restarts after an expired key.
 
 ### 12.9 Related sections
 

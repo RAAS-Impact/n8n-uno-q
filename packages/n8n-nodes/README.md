@@ -2,7 +2,12 @@
 
 n8n community nodes for the [Arduino UNO Q](https://store.arduino.cc/products/uno-q) — read sensors, drive GPIO, call I²C devices, and expose MCU methods as tools for n8n's AI Agent. Workflows talk directly to the on-board microcontroller via `arduino-router`, no Python proxy in the way.
 
-n8n can run on the Q itself (unix socket, same host) or on any other machine that can reach the Q over TCP via the [socat relay container](https://github.com/raas-impact/n8n-uno-q/tree/main/deploy/relay). Both setups use the same nodes and the same `Arduino UNO Q Router` credential — a single field toggles between them.
+n8n can run on the Q itself (unix socket, same host) or on any other machine that can reach the Q over TCP via a relay container. Two relay flavours ship with this project:
+
+- [**`deploy/relay/`**](https://github.com/raas-impact/n8n-uno-q/tree/main/deploy/relay) — plain `socat`, for trusted LANs. No auth, no encryption.
+- [**`deploy/relay-mtls/`**](https://github.com/raas-impact/n8n-uno-q/tree/main/deploy/relay-mtls) — `stunnel` with mutual TLS, for untrusted networks. Requires issuing a client cert via the bundled [`pki`](https://github.com/raas-impact/n8n-uno-q/tree/main/deploy/relay-mtls/pki) wrapper.
+
+All three setups (unix socket, plain TCP, mTLS) use the same nodes and the same `Arduino UNO Q Router` credential — the transport choice and the optional *Use TLS* toggle pick which one.
 
 ## Requirements
 
@@ -25,7 +30,7 @@ Each node needs one `Arduino UNO Q Router` credential assigned. Create it under 
 
 | Field | When shown | Meaning |
 |---|---|---|
-| Transport | always | `Unix Socket (local)` for same-host, `TCP` for remote. |
+| Transport | always | `Unix Socket (local)` for same-host, `TCP` for remote (plain or mTLS — picked by the *Use TLS* toggle below). |
 | Socket Path | Transport = Unix | Path to `arduino-router`'s unix socket. Default `/var/run/arduino-router.sock` fits the [sample docker-compose](https://github.com/raas-impact/n8n-uno-q/blob/main/deploy/n8n/docker-compose.yml). |
 | Host | Transport = TCP | Hostname or IP of the Q running the relay container. |
 | Port | Transport = TCP | TCP port of the relay container. Default `5775`. |
