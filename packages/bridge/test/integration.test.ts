@@ -21,8 +21,13 @@
  *                     npm run test:integration -w packages/bridge
  *
  *   C. TLS (Variant C mTLS relay — CONTEXT.md §12.5.3):
- *        On the PC, after running the pki scripts:
- *          UNOQ_TLS_HOST=127.0.0.1 UNOQ_TLS_PORT=5775 \
+ *        UNOQ_TLS_HOST must be a name/IP covered by the server cert's SAN —
+ *        usually the hostname you passed to `./pki add device <nick>` (default
+ *        <nick>.local). Using 127.0.0.1 through an SSH tunnel will fail the
+ *        TLS hostname verification unless the cert was issued with that IP
+ *        in its SAN. Unlike plain TCP, TLS cares which host string you use.
+ *
+ *          UNOQ_TLS_HOST=linucs.local UNOQ_TLS_PORT=5775 \
  *          UNOQ_TLS_CA=deploy/relay-mtls/pki/out/n8n/laptop/ca.pem \
  *          UNOQ_TLS_CERT=deploy/relay-mtls/pki/out/n8n/laptop/client.pem \
  *          UNOQ_TLS_KEY=deploy/relay-mtls/pki/out/n8n/laptop/client.key \
@@ -30,12 +35,42 @@
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import fs from 'node:fs';
+import path from 'node:path';
 import { Bridge } from '../src/index.js';
 import type { ConnectOptions } from '../src/index.js';
 
 type TransportCase = { name: string; opts: ConnectOptions };
 
 const transports: TransportCase[] = [];
+
+// Resolve UNOQ_TLS_* paths against the directory the user actually invoked
+// the command from, not against vitest's CWD. When `npm run test:integration
+// -w packages/bridge` runs, npm cd's into packages/bridge first and the
+// raw `process.cwd()` becomes that package dir — so repo-relative paths
+// like `deploy/relay-mtls/pki/...` would break. INIT_CWD is npm's pre-cd
+// directory, which is what users think of as "where I ran the command."
+// Absolute paths pass through untouched.
+function resolveUserPath(p: string): string {
+  if (path.isAbsolute(p)) return p;
+  return path.resolve(process.env.INIT_CWD ?? process.cwd(), p);
+}
+
+function readCertOrExplain(varName: string, rawPath: string): string {
+  const resolved = resolveUserPath(rawPath);
+  try {
+    return fs.readFileSync(resolved, 'utf-8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error(
+        `${varName} not found: ${resolved}\n` +
+          `  Raw value: ${rawPath}\n` +
+          `  Resolved against: ${process.env.INIT_CWD ?? process.cwd()}\n` +
+          `  Use an absolute path or a path relative to where you ran npm.`,
+      );
+    }
+    throw err;
+  }
+}
 
 if (process.env.UNOQ_SOCKET) {
   transports.push({
@@ -65,9 +100,8 @@ if (
   process.env.UNOQ_TLS_CERT &&
   process.env.UNOQ_TLS_KEY
 ) {
-  // Read cert files synchronously at test-module load time. If any path is
-  // wrong, the thrown ENOENT surfaces before the test even registers, which
-  // is the clearest failure signal for an integration config error.
+  // Read cert files synchronously at module-load time so path errors surface
+  // before any test registers — clearest signal for an integration misconfig.
   transports.push({
     name: 'tls',
     opts: {
@@ -75,9 +109,9 @@ if (
         kind: 'tls',
         host: process.env.UNOQ_TLS_HOST,
         port: Number(process.env.UNOQ_TLS_PORT),
-        ca: fs.readFileSync(process.env.UNOQ_TLS_CA, 'utf-8'),
-        cert: fs.readFileSync(process.env.UNOQ_TLS_CERT, 'utf-8'),
-        key: fs.readFileSync(process.env.UNOQ_TLS_KEY, 'utf-8'),
+        ca:   readCertOrExplain('UNOQ_TLS_CA',   process.env.UNOQ_TLS_CA),
+        cert: readCertOrExplain('UNOQ_TLS_CERT', process.env.UNOQ_TLS_CERT),
+        key:  readCertOrExplain('UNOQ_TLS_KEY',  process.env.UNOQ_TLS_KEY),
       },
       reconnect: { enabled: false },
     },
