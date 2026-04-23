@@ -429,12 +429,24 @@ export class Bridge extends EventEmitter {
    * The handler receives (params, msgid) and should return the result
    * (or throw to send an error response back to the caller).
    *
+   * Idempotent on the same Bridge instance: if the method is already
+   * registered on this socket (e.g. a prior n8n trigger closeFunction cleared
+   * its local refcount but the Bridge was kept alive by other subscribers, so
+   * the router-side $/register is still live), we swap the handler locally
+   * and skip the round-trip. Without this, the router rejects the second
+   * $/register with "route already exists" and the trigger fails to re-arm.
+   *
    * Example:
    * ```ts
    * await bridge.provide('echo', (params) => ({ echo: params }));
    * ```
    */
   async provide(method: string, handler: ProvideHandler): Promise<void> {
+    if (this.providers.has(method)) {
+      debug('provide', 'reusing router registration for', method);
+      this.providers.set(method, handler);
+      return;
+    }
     await this.call('$/register', method);
     this.providers.set(method, handler);
   }

@@ -70,10 +70,24 @@ export class BridgeManager {
       debug('acquire', key, 'awaiting pendingClose');
       await entry.pendingClose;
     }
+    // Bump refCount BEFORE Bridge.connect so a concurrent acquire() sees us
+    // as an owner and doesn't race to open a second socket. If connect
+    // throws, we must undo the increment — otherwise failed connects (TLS
+    // handshake hiccups, transient network) pin the entry alive forever,
+    // which is what originally surfaced as "route already exists" in prod.
     entry.refCount++;
     const opened = !entry.bridge;
     if (!entry.bridge) {
-      entry.bridge = await Bridge.connect({ transport: descriptor });
+      try {
+        entry.bridge = await Bridge.connect({ transport: descriptor });
+      } catch (err) {
+        entry.refCount--;
+        debug('acquire:connect-failed', key, `refCount=${entry.refCount}`, (err as Error).message);
+        if (entry.refCount === 0 && entry.methodRefs.size === 0 && entry.pendingClose === null) {
+          this.entries.delete(key);
+        }
+        throw err;
+      }
     }
     debug('acquire', key, `refCount=${entry.refCount}`, opened ? 'opened new bridge' : 'reused bridge');
     return entry.bridge;

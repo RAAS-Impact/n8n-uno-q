@@ -113,11 +113,18 @@ export class UnoQRouterApi implements ICredentialType {
       displayName: 'Client Key (PEM)',
       name: 'clientKey',
       type: 'string',
-      typeOptions: { rows: 4, password: true },
+      // NOT `password: true`. n8n's masked textareas round-trip the masked
+      // placeholder back into storage on any credential re-save — with
+      // multi-line PEM the re-save corrupts the key and OpenSSL rejects it as
+      // "DECODER routines::unsupported" on the next TLS connect. n8n encrypts
+      // credential values at rest regardless of UI masking, so leaving this
+      // unmasked doesn't change security posture — only the in-form display
+      // during editing. Matches caCert / clientCert above.
+      typeOptions: { rows: 4, password: false },
       default: '',
       displayOptions: { show: { transport: ['tcp'], useTls: [true] } },
       description:
-        'Paste the contents of client.key from your n8n client bundle. This is the private key matching the Client Certificate above. Treat it as a secret — n8n stores it encrypted.',
+        'Paste the contents of client.key from your n8n client bundle. This is the private key matching the Client Certificate above. Stored encrypted by n8n regardless of the in-form display.',
       required: true,
     },
   ];

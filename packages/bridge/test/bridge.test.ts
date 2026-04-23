@@ -251,6 +251,41 @@ describe('Bridge', () => {
       expect((resp as [number, number, unknown, unknown])[3]).toBe('late-ok');
     });
 
+    it('is idempotent on the same socket — second provide() swaps handler without re-sending $/register', async () => {
+      // Reproduces the "route already exists" scenario: a shared Bridge kept
+      // alive by other users outlives a trigger's closeFunction, so the
+      // router-side $/register is still live when the trigger re-arms.
+      let hits = 0;
+      await bridge.provide('my_method', () => {
+        hits++;
+        return 'first';
+      });
+
+      // Count $/register calls for my_method in the router's history.
+      const countRegisters = () =>
+        router.received.filter(
+          (m) =>
+            m[0] === MSG_REQUEST &&
+            m[2] === '$/register' &&
+            (m as RpcRequest)[3][0] === 'my_method',
+        ).length;
+      expect(countRegisters()).toBe(1);
+
+      // Second provide() must not re-send $/register (router would reject it
+      // with "route already exists" in prod) but must swap the handler.
+      let secondHandlerHit = false;
+      await bridge.provide('my_method', () => {
+        secondHandlerHit = true;
+        return 'second';
+      });
+      expect(countRegisters()).toBe(1);
+
+      router.sendRequest(101, 'my_method', []);
+      await new Promise((r) => setTimeout(r, 30));
+      expect(secondHandlerHit).toBe(true);
+      expect(hits).toBe(0); // first handler was evicted
+    });
+
     it('handler errors become error responses', async () => {
       await bridge.provide('fail_method', () => {
         throw new Error('oops');

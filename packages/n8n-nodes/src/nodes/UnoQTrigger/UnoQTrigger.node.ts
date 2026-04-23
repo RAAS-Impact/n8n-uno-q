@@ -164,7 +164,24 @@ export class UnoQTrigger implements INodeType {
 
     const manager = BridgeManager.getInstance();
     const bridge = await manager.acquire(descriptor);
-    manager.addMethodRef(descriptor, method);
+    const isFirstMethodSubscriber = manager.addMethodRef(descriptor, method);
+
+    // Request mode has an "only one trigger can own this method" invariant.
+    // Historically the router enforced it by rejecting the second $/register
+    // with "route already exists". Now that Bridge.provide() is idempotent on
+    // the same socket (so a test-listen re-arm succeeds against a lingering
+    // router-side registration), the router no longer sees a duplicate — we
+    // must enforce the single-owner rule in-process ourselves. Notification
+    // mode is unaffected: multiple handlers per method are explicitly allowed.
+    if (mode === 'request' && !isFirstMethodSubscriber) {
+      manager.removeMethodRef(descriptor, method);
+      await manager.release(descriptor);
+      throw new NodeOperationError(
+        this.getNode(),
+        `Another trigger in this n8n instance already owns "${method}" in Request mode. ` +
+          `Only one Request-mode trigger can own a method — use Notification mode to share it.`,
+      );
+    }
 
     const emit = (data: IDataObject) => {
       this.emit([this.helpers.returnJsonArray([data])]);

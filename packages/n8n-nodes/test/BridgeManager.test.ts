@@ -102,6 +102,47 @@ class MockRouter {
   }
 }
 
+describe('BridgeManager acquire() refCount hygiene', () => {
+  it('does not leak refCount when Bridge.connect throws', async () => {
+    // A failed connect (TLS handshake blip, socket missing, etc.) used to pin
+    // the entry alive forever because acquire() bumped refCount before the
+    // await and never rolled it back on failure. Over time this made the
+    // bridge non-closeable, which is the precondition for "route already
+    // exists" errors on subsequent trigger re-arms.
+    const manager = new BridgeManager();
+    const descriptor = {
+      kind: 'unix' as const,
+      path: path.join(os.tmpdir(), `nonexistent-${crypto.randomUUID()}.sock`),
+    };
+
+    await expect(manager.acquire(descriptor)).rejects.toThrow();
+
+    // Snapshot should either be undefined (entry dropped) or show refCount=0.
+    const snap = manager.snapshot(descriptor);
+    if (snap) {
+      expect(snap.refCount).toBe(0);
+      expect(snap.bridgeOpen).toBe(false);
+    }
+
+    // A subsequent successful acquire against a live socket must start from a
+    // clean state — refCount must be 1, not 2 (which would indicate the
+    // previous failed attempt leaked a slot).
+    const router = new MockRouter();
+    await router.start();
+    try {
+      const liveDescriptor = { kind: 'unix' as const, path: router.socketPath };
+      const bridge = await manager.acquire(liveDescriptor);
+      bridge.on('error', () => {});
+      const liveSnap = manager.snapshot(liveDescriptor);
+      expect(liveSnap?.refCount).toBe(1);
+      await manager.release(liveDescriptor);
+      await new Promise((r) => setTimeout(r, 50));
+    } finally {
+      await router.stop();
+    }
+  });
+});
+
 describe('BridgeManager close race', () => {
   it('does not leave the previous bridge connected to the router after acquire+release churn', async () => {
     const router = new MockRouter();
