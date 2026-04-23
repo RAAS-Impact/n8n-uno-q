@@ -7,6 +7,7 @@
 #   add device <nick> [opts]    Issues a server cert for a Q
 #   add n8n    <nick>           Issues a client cert for an n8n instance
 #   list                        Shows all issued certs and their expiry
+#   show <nick> [-v]            Shows details of one cert (or "ca")
 #   remove <nick>               Marks a cert decommissioned and deletes its files
 #   help                        This help
 #
@@ -37,6 +38,11 @@ case "$cmd" in
     # shellcheck source=lib/list.sh
     source "$PKI_DIR/lib/list.sh"
     list_cmd "$@"
+    ;;
+  show)
+    # shellcheck source=lib/show.sh
+    source "$PKI_DIR/lib/show.sh"
+    show_cmd "$@"
     ;;
   remove|rm)
     # shellcheck source=lib/remove.sh

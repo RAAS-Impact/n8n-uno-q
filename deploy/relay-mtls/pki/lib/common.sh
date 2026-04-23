@@ -153,6 +153,7 @@ Usage:
                                                      Issue a server cert for a Q
   ./pki add n8n <nickname>                           Issue a client cert for an n8n instance
   ./pki list                                         Show all issued certs
+  ./pki show <nickname> [-v]                         Show one cert's details (use 'ca' for the home CA)
   ./pki remove <nickname>                            Decommission a cert (delete files, mark in ledger)
   ./pki help                                         This help
 
@@ -162,6 +163,8 @@ Examples:
   ./pki add device garage --hostname garage.home.lan --ip 192.168.1.42
   ./pki add n8n laptop                               For the n8n credential
   ./pki list
+  ./pki show kitchen                                 Curated summary
+  ./pki show kitchen -v                              Full openssl x509 -text dump
 
 All state lives in this directory:
   ca/         Your home CA (back this up! losing ca.key means re-issuing every cert)
