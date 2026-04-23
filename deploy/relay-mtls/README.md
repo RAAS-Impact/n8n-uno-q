@@ -21,8 +21,8 @@ See [CONTEXT.md §12.5.3](../../CONTEXT.md#1253-variant-c--stunnel--mtls) for th
 | `Dockerfile` | Alpine + stunnel. |
 | `stunnel.conf` | mTLS config: `verifyPeer=yes`, requires a cert signed by your CA. |
 | `docker-compose.yml` | Publishes the TCP port; bind-mounts `/var/run` for the router socket and `./certs` (read-only) for the PKI material. |
-| `install.sh` | Deploy to a Q (requires `--device <nick>`). |
-| `uninstall.sh` | Remove from a Q. |
+| `install.sh` | Deploy to a Q. Requires `--device <nick>`; accepts `--host <user@host>` (overrides `UNOQ_HOST`). |
+| `uninstall.sh` | Remove from a Q. Accepts `--host <user@host>`. |
 | `certs/` | Where the deployed cert lives on the Q. Locally only a `.gitignore`. |
 | `pki/` | PC-only cert issuance tooling. **Never shipped to the Q.** See [pki/README.md](pki/README.md). |
 

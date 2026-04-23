@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
-# Install Variant C (stunnel + mTLS) relay on a Q.
+# Install the stunnel + mTLS relay on a Q.
 #
 # Rsyncs the relay files and the cert bundle for a specific device to
 # $REMOTE_BASE/relay-mtls/ on the host, then runs `docker compose up -d`.
 # Idempotent — safe to re-run (e.g. after re-issuing a cert).
 #
 # Prerequisites:
-#   - Run ./pki setup once (first time only)
-#   - Run ./pki add device <nick> for this Q
+#   - Run ./pki/pki setup once (first time only)
+#   - Run ./pki/pki add device <nick> for this Q
 #
 # Usage:
-#   ./install.sh --device <nick>
+#   ./install.sh --device <nick> [--host <user@host>]
 #
-# Env overrides:
-#   UNOQ_HOST=arduino@kitchen.local
+# Host resolution (highest to lowest priority):
+#   1. --host <user@host>
+#   2. UNOQ_HOST env var
+#   3. arduino@linucs.local (default)
+#
+# Other env overrides:
 #   UNOQ_BASE=/home/arduino
 set -euo pipefail
 
@@ -23,30 +27,40 @@ DEPLOY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$DEPLOY_DIR/lib/ssh-multiplex.sh"
 
 DEVICE=""
+HOST_OVERRIDE=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --device) DEVICE="$2"; shift 2 ;;
+    --device)   DEVICE="$2"; shift 2 ;;
     --device=*) DEVICE="${1#*=}"; shift ;;
+    --host)     HOST_OVERRIDE="$2"; shift 2 ;;
+    --host=*)   HOST_OVERRIDE="${1#*=}"; shift ;;
     -h|--help|help)
       cat <<EOF
-Usage: $0 --device <nickname>
+Usage: $(basename "$0") --device <nickname> [--host <user@host>]
 
-Installs mTLS relay on \$UNOQ_HOST using the cert bundle
-previously issued by ./pki add device <nickname>.
+Deploys the mTLS relay using the cert bundle previously issued
+by ./pki/pki add device <nickname>.
+
+Options:
+  --device <nickname>  (required) Which cert bundle to push to the Q.
+  --host <user@host>   Override the target host for this invocation.
+                       Without it, UNOQ_HOST (env) or 'arduino@linucs.local'
+                       (default) is used.
 EOF
       exit 0
       ;;
     *)
       echo "Unknown option: $1" >&2
-      echo "Usage: $0 --device <nickname>" >&2
+      echo "Usage: $(basename "$0") --device <nickname> [--host <user@host>]" >&2
       exit 1
       ;;
   esac
 done
+[ -n "$HOST_OVERRIDE" ] && HOST="$HOST_OVERRIDE"
 
 if [ -z "$DEVICE" ]; then
   echo "error: --device <nickname> is required." >&2
-  echo "Run ./pki add device <nickname> first, then: $0 --device <nickname>" >&2
+  echo "Run ./pki/pki add device <nickname> first, then: $(basename "$0") --device <nickname>" >&2
   exit 1
 fi
 
@@ -73,10 +87,10 @@ echo "Installing mTLS relay for device '$DEVICE' on $HOST..."
 ssh "${SSH_OPTS[@]}" "$HOST" "mkdir -p $REMOTE_DIR/certs"
 
 # Sync relay files. Exclude:
-#   pki/        → PC-only cert issuance tooling; contains ca.key (never ship!)
-#   certs/      → populated separately below with the device-specific bundle
-#   install.sh  → PC-only
-#   uninstall.sh
+#   pki/         → PC-only cert issuance tooling; contains ca.key (never ship!)
+#   certs/       → populated separately below with the device-specific bundle
+#   install.sh   → PC-only
+#   uninstall.sh → PC-only
 rsync -av --delete -e "$SSH_CMD" \
   --exclude pki \
   --exclude certs \

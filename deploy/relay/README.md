@@ -13,15 +13,21 @@ See [CONTEXT.md §12.5.1](../../CONTEXT.md#1251-variant-a--socat-only-step-1-del
 | `Dockerfile` | Alpine + socat. Built locally on the Q. |
 | `entrypoint.sh` | One-line socat invocation: TCP listen → Unix socket connect. |
 | `docker-compose.yml` | Publishes the TCP port; bind-mounts `/var/run` so socat can reach the router's socket. |
-| `install.sh` | Deploy to a Q. |
-| `uninstall.sh` | Remove from a Q. |
+| `install.sh` | Deploy to a Q. Accepts `--host <user@host>` to pick a target (overrides `UNOQ_HOST`). |
+| `uninstall.sh` | Remove from a Q. Same `--host` option. |
 
 ## Install
 
 From the repo root or from this directory:
 
 ```bash
-UNOQ_HOST=arduino@kitchen.local ./install.sh
+./install.sh --host arduino@kitchen.local
+```
+
+Or, if you've set `UNOQ_HOST` once in your environment:
+
+```bash
+./install.sh
 ```
 
 What it does:

@@ -66,8 +66,10 @@ Two paths depending on whether you've cloned this repo:
 **Cloned repo (recommended if you're already developing against it):**
 
 ```bash
-UNOQ_HOST=arduino@<q-hostname> ./deploy/relay/install.sh
+./deploy/relay/install.sh --host arduino@<q-hostname>
 ```
+
+(Or set `UNOQ_HOST=arduino@<q-hostname>` once in your environment and call `./deploy/relay/install.sh` without the flag.)
 
 The installer rsyncs the three files to the Q, runs `docker compose up -d`, and prints verification commands. See [`deploy/relay/README.md`](deploy/relay/README.md) for env-var overrides and the uninstall.
 
@@ -104,8 +106,7 @@ mTLS-authenticated; every client presents a certificate the relay checks against
 ./deploy/relay-mtls/pki/pki add n8n laptop
 
 # Deploy the relay + device cert to the Q.
-UNOQ_HOST=arduino@<q-hostname> \
-  ./deploy/relay-mtls/install.sh --device kitchen
+./deploy/relay-mtls/install.sh --device kitchen --host arduino@<q-hostname>
 ```
 
 The [PKI README](deploy/relay-mtls/pki/README.md) walks through every step, including hostname/IP options, troubleshooting, and when to consider `step-ca` for larger fleets. The [relay-mtls README](deploy/relay-mtls/README.md) covers install/uninstall details and common failure modes.

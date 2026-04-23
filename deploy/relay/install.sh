@@ -1,21 +1,55 @@
 #!/usr/bin/env bash
-# Install Variant A (plain socat) relay on a Q.
+# Install the plain socat relay on a Q.
 #
 # Rsyncs the relay files to $REMOTE_BASE/relay/ on the host and runs
 # `docker compose up -d`. Idempotent — safe to re-run to update a live relay.
 #
-# Env overrides:
-#   UNOQ_HOST=arduino@garage.local   → target host (default arduino@linucs.local)
+# Usage:
+#   ./install.sh [--host <user@host>]
+#
+# Host resolution (highest to lowest priority):
+#   1. --host <user@host>  flag on the command line
+#   2. UNOQ_HOST           env var
+#   3. arduino@linucs.local (default)
+#
+# Other env overrides:
 #   UNOQ_BASE=/home/arduino          → base dir on the Q
 #
-# No cert material is involved — Variant A is plaintext TCP on the LAN.
-# Use Variant C (deploy/relay-mtls) when the LAN isn't trusted.
+# No cert material is involved — this relay is plaintext TCP on the LAN.
+# Use the mTLS relay (deploy/relay-mtls/) when the LAN isn't trusted.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck source=../lib/ssh-multiplex.sh
 source "$DEPLOY_DIR/lib/ssh-multiplex.sh"
+
+HOST_OVERRIDE=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --host)   HOST_OVERRIDE="$2"; shift 2 ;;
+    --host=*) HOST_OVERRIDE="${1#*=}"; shift ;;
+    -h|--help|help)
+      cat <<EOF
+Usage: $(basename "$0") [--host <user@host>]
+
+Deploys the plain socat relay.
+
+Options:
+  --host <user@host>   Override the target host for this invocation.
+                       Without it, UNOQ_HOST (env) or 'arduino@linucs.local'
+                       (default) is used.
+EOF
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      echo "Usage: $(basename "$0") [--host <user@host>]" >&2
+      exit 1
+      ;;
+  esac
+done
+[ -n "$HOST_OVERRIDE" ] && HOST="$HOST_OVERRIDE"
 
 REMOTE_DIR="$REMOTE_BASE/relay"
 

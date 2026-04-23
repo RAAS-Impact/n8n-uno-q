@@ -145,7 +145,7 @@ validate_nickname() {
 # --- Help -------------------------------------------------------------------
 print_help() {
   cat <<'EOF'
-pki — issue mTLS certificates for the UNO Q relay (Variant C).
+pki — issue mTLS certificates for the UNO Q relay.
 
 Usage:
   ./pki setup                                        First time: create your home CA
