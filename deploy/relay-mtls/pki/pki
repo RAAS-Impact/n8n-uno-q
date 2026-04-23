@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+#
+# pki — tiny openssl wrapper for the UNO Q mTLS relay (Variant C).
+#
+# Usage: ./pki <command> [args]
+#   setup                       First-time: creates your home CA
+#   add device <nick> [opts]    Issues a server cert for a Q
+#   add n8n    <nick>           Issues a client cert for an n8n instance
+#   list                        Shows all issued certs and their expiry
+#   remove <nick>               Marks a cert decommissioned and deletes its files
+#   help                        This help
+#
+# Design goal: a beginner with no PKI background can run the first three
+# commands and have a working mTLS relay. Every openssl concept (CN, SAN,
+# EKU, ...) is hidden behind defaults derived from the nickname.
+set -euo pipefail
+
+PKI_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/common.sh
+source "$PKI_DIR/lib/common.sh"
+
+cmd="${1:-help}"
+shift || true
+
+case "$cmd" in
+  setup)
+    # shellcheck source=lib/setup.sh
+    source "$PKI_DIR/lib/setup.sh"
+    setup_cmd "$@"
+    ;;
+  add)
+    # shellcheck source=lib/add.sh
+    source "$PKI_DIR/lib/add.sh"
+    add_cmd "$@"
+    ;;
+  list|ls)
+    # shellcheck source=lib/list.sh
+    source "$PKI_DIR/lib/list.sh"
+    list_cmd "$@"
+    ;;
+  remove|rm)
+    # shellcheck source=lib/remove.sh
+    source "$PKI_DIR/lib/remove.sh"
+    remove_cmd "$@"
+    ;;
+  help|--help|-h|"")
+    print_help
+    ;;
+  *)
+    err "Unknown command: $cmd"
+    print_help
+    exit 1
+    ;;
+esac

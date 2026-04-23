@@ -1,0 +1,4 @@
+# Home CA material and issued cert bundles are user-local — never commit.
+ca/
+out/
+certs.tsv
