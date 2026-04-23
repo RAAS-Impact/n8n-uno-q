@@ -29,10 +29,24 @@ Each node needs one `Arduino UNO Q Router` credential assigned. Create it under 
 | Socket Path | Transport = Unix | Path to `arduino-router`'s unix socket. Default `/var/run/arduino-router.sock` fits the [sample docker-compose](https://github.com/raas-impact/n8n-uno-q/blob/main/deploy/n8n/docker-compose.yml). |
 | Host | Transport = TCP | Hostname or IP of the Q running the relay container. |
 | Port | Transport = TCP | TCP port of the relay container. Default `5775`. |
+| Use TLS (mTLS) | Transport = TCP | Toggle on for Variant C (mTLS) relays. See below. |
+| CA / Client Cert / Client Key | Use TLS = on | PEM contents from your n8n client bundle (see below). |
 
 **Test Connection** runs `$/version` end-to-end over the configured transport and returns the router's version on success, or a specific failure message (socket not found, connection refused, timeout, etc.).
 
-The TCP transport is unauthenticated and unencrypted. Only use it on networks you already trust — home LAN, or loopback over an SSH tunnel.
+### mTLS (Variant C)
+
+Plain TCP is unauthenticated and unencrypted — only safe on a trusted LAN. For untrusted networks, enable **Use TLS (mTLS)** to speak to a Variant C [`stunnel` relay](https://github.com/raas-impact/n8n-uno-q/tree/main/deploy/relay-mtls). Three extra fields appear:
+
+1. **CA Certificate (PEM)** — paste `ca.pem` from your n8n client bundle.
+2. **Client Certificate (PEM)** — paste `client.pem`.
+3. **Client Key (PEM)** — paste `client.key`. n8n stores the key encrypted.
+
+All three come from the same bundle issued by the [`pki`](https://github.com/raas-impact/n8n-uno-q/tree/main/deploy/relay-mtls/pki) wrapper: running `./pki add n8n laptop` produces `pki/out/n8n/laptop/{ca.pem,client.pem,client.key}`. Paste the *contents* of each file (not the path) into the matching field.
+
+If any of the three is missing when **Use TLS** is on, the node errors on first use with a message naming the empty field(s). *Test Connection* catches the same case before you save.
+
+Turning **Use TLS** back off ignores any stale cert data — the descriptor reverts to plain TCP on the same host + port.
 
 ### Multiple Qs
 

@@ -78,5 +78,47 @@ export class UnoQRouterApi implements ICredentialType {
         'TCP port of the relay container. Default 5775 matches deploy/relay/docker-compose.yml.',
       required: true,
     },
+    {
+      displayName: 'Use TLS (mTLS)',
+      name: 'useTls',
+      type: 'boolean',
+      default: false,
+      displayOptions: { show: { transport: ['tcp'] } },
+      description:
+        'Enable when connecting to a Variant C (mTLS) relay — see deploy/relay-mtls/. Requires a client certificate signed by the same CA that signed the relay\'s server cert. Leave off for Variant A (plaintext) relays on trusted LANs.',
+    },
+    {
+      displayName: 'CA Certificate (PEM)',
+      name: 'caCert',
+      type: 'string',
+      typeOptions: { rows: 4, password: false },
+      default: '',
+      displayOptions: { show: { transport: ['tcp'], useTls: [true] } },
+      description:
+        'Paste the contents of ca.pem from your n8n client bundle (deploy/relay-mtls/pki/out/n8n/<nick>/ca.pem). This is the CA that signed the Q\'s server cert — n8n uses it to verify you\'re talking to the right Q.',
+      required: true,
+    },
+    {
+      displayName: 'Client Certificate (PEM)',
+      name: 'clientCert',
+      type: 'string',
+      typeOptions: { rows: 4, password: false },
+      default: '',
+      displayOptions: { show: { transport: ['tcp'], useTls: [true] } },
+      description:
+        'Paste the contents of client.pem from your n8n client bundle. This is the cert n8n presents to the relay so the relay can verify n8n is authorised.',
+      required: true,
+    },
+    {
+      displayName: 'Client Key (PEM)',
+      name: 'clientKey',
+      type: 'string',
+      typeOptions: { rows: 4, password: true },
+      default: '',
+      displayOptions: { show: { transport: ['tcp'], useTls: [true] } },
+      description:
+        'Paste the contents of client.key from your n8n client bundle. This is the private key matching the Client Certificate above. Treat it as a secret — n8n stores it encrypted.',
+      required: true,
+    },
   ];
 }

@@ -20,6 +20,11 @@ export interface UnoQRouterCredential {
   socketPath?: string;
   host?: string;
   port?: number;
+  /** mTLS mode (Variant C). When true, caCert/clientCert/clientKey must all be populated. */
+  useTls?: boolean;
+  caCert?: string;
+  clientCert?: string;
+  clientKey?: string;
 }
 
 interface ResolverContext {
@@ -89,6 +94,27 @@ export function descriptorFromCredential(
         node,
         `Credential has invalid port ${cred.port ?? '(empty)'}; expected 1–65535.`,
       );
+    }
+    if (cred.useTls) {
+      // With `displayOptions` the three fields are shown as required when the
+      // toggle is on, so n8n should prevent saving an incomplete credential.
+      // We re-check here anyway because a credential edited via the REST API
+      // could bypass the form (and the resulting connect() error would be
+      // opaque otherwise).
+      const ca = (cred.caCert ?? '').trim();
+      const cert = (cred.clientCert ?? '').trim();
+      const key = (cred.clientKey ?? '').trim();
+      const missing: string[] = [];
+      if (!ca) missing.push('CA Certificate');
+      if (!cert) missing.push('Client Certificate');
+      if (!key) missing.push('Client Key');
+      if (missing.length) {
+        throw new NodeOperationError(
+          node,
+          `Credential has "Use TLS" on but ${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} empty. Paste the PEM contents from your n8n client bundle (deploy/relay-mtls/pki/out/n8n/<nick>/).`,
+        );
+      }
+      return { kind: 'tls', host, port, ca, cert, key };
     }
     return { kind: 'tcp', host, port };
   }

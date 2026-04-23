@@ -191,4 +191,107 @@ describe('descriptorFromCredential', () => {
       } as UnoQRouterCredential),
     ).toThrow(/invalid port/);
   });
+
+  describe('TLS (mTLS)', () => {
+    it('builds a tls descriptor when useTls is on and all three cert fields are populated', () => {
+      const d = descriptorFromCredential(fakeNode, {
+        transport: 'tcp',
+        host: 'kitchen.local',
+        port: 5775,
+        useTls: true,
+        caCert: 'CA-PEM',
+        clientCert: 'CLIENT-PEM',
+        clientKey: 'CLIENT-KEY-PEM',
+      });
+      expect(d).toEqual({
+        kind: 'tls',
+        host: 'kitchen.local',
+        port: 5775,
+        ca: 'CA-PEM',
+        cert: 'CLIENT-PEM',
+        key: 'CLIENT-KEY-PEM',
+      });
+    });
+
+    it('trims whitespace from each PEM', () => {
+      const d = descriptorFromCredential(fakeNode, {
+        transport: 'tcp',
+        host: 'kitchen.local',
+        port: 5775,
+        useTls: true,
+        caCert: '\n\n  CA-PEM  \n',
+        clientCert: '  CLIENT-PEM\n',
+        clientKey: 'CLIENT-KEY-PEM  \n',
+      });
+      expect(d).toMatchObject({ ca: 'CA-PEM', cert: 'CLIENT-PEM', key: 'CLIENT-KEY-PEM' });
+    });
+
+    it('falls back to plain tcp when useTls is false even if cert fields are set', () => {
+      // Mirrors the UI: clearing the toggle must not leak cert material into
+      // a plaintext connection. The stale fields from a previous TLS config
+      // are silently ignored.
+      const d = descriptorFromCredential(fakeNode, {
+        transport: 'tcp',
+        host: 'kitchen.local',
+        port: 5775,
+        useTls: false,
+        caCert: 'leftover',
+        clientCert: 'leftover',
+        clientKey: 'leftover',
+      });
+      expect(d).toEqual({ kind: 'tcp', host: 'kitchen.local', port: 5775 });
+    });
+
+    it('rejects useTls=true with any missing cert field, naming all that are missing', () => {
+      const base = {
+        transport: 'tcp' as const,
+        host: 'kitchen.local',
+        port: 5775,
+        useTls: true,
+      };
+
+      expect(() =>
+        descriptorFromCredential(fakeNode, {
+          ...base,
+          clientCert: 'X',
+          clientKey: 'X',
+        }),
+      ).toThrow(/CA Certificate/);
+
+      expect(() =>
+        descriptorFromCredential(fakeNode, {
+          ...base,
+          caCert: 'X',
+          clientKey: 'X',
+        }),
+      ).toThrow(/Client Certificate/);
+
+      expect(() =>
+        descriptorFromCredential(fakeNode, {
+          ...base,
+          caCert: 'X',
+          clientCert: 'X',
+        }),
+      ).toThrow(/Client Key/);
+
+      // All three missing → all three named (comma-joined).
+      expect(() => descriptorFromCredential(fakeNode, base)).toThrow(
+        /CA Certificate, Client Certificate, Client Key/,
+      );
+    });
+
+    it('rejects useTls=true when a PEM field is whitespace-only', () => {
+      expect(() =>
+        descriptorFromCredential(fakeNode, {
+          transport: 'tcp',
+          host: 'kitchen.local',
+          port: 5775,
+          useTls: true,
+          caCert: '   \n  ',
+          clientCert: 'X',
+          clientKey: 'X',
+        }),
+      ).toThrow(/CA Certificate/);
+    });
+  });
 });
