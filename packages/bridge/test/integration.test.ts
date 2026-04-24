@@ -266,5 +266,60 @@ for (const t of transports) {
         await trigger.close();
       }
     });
+
+    it('gpio_event: router forwards MCU interrupt to bridge without handler → patched error to MCU + caller', async () => {
+      // End-to-end reproduction of the exact scenario the patch at
+      // bridge.ts:294-312 defends against.
+      //
+      //   1. Bridge A registers "gpio_event" on the router ($/register).
+      //      The router now routes any inbound "gpio_event" request to A's
+      //      socket.
+      //   2. We delete "gpio_event" from A's local providers map *without*
+      //      sending $/unregister — this is the drift shape a stale cache /
+      //      reconnect race / mis-ordered teardown would leave us in.
+      //   3. fire_test_event makes the MCU's ISR run Bridge.call("gpio_event", 2)
+      //      over HS1. The router forwards it to A. A hits the patched
+      //      else-branch and replies with
+      //      "no handler registered for method: gpio_event". That error
+      //      travels back to the MCU, which prints it to its serial console.
+      //      When you run this test against a real Q you should see that
+      //      exact line in the Q's logs — not the router-level "method
+      //      gpio_event not available" you'd see if no bridge had registered
+      //      at all.
+      //
+      // Programmatic assertion uses a second Node bridge to call gpio_event
+      // directly — same protocol path, observable rejection — and pins the
+      // exact error string emitted at bridge.ts:308. That prefix appears
+      // nowhere else in the codebase, so a match proves the response came
+      // from A's else-branch on a real router round-trip. handlerInvocations
+      // must stay at 0 — if it isn't, the local deletion didn't take effect
+      // and we'd be accidentally testing the happy path.
+      bridge = await connect();
+      const trigger = await connect();
+      const caller = await connect();
+      let handlerInvocations = 0;
+      try {
+        await bridge.provide('gpio_event', () => {
+          handlerInvocations += 1;
+          return 'should-never-run';
+        });
+        (bridge as unknown as { providers: Map<string, unknown> }).providers.delete('gpio_event');
+
+        // Kick the MCU so the patched error string shows up in the Q's
+        // serial-console logs. The MCU's Bridge.call will return the error
+        // and the sketch prints it; fire_test_event itself only schedules
+        // the interrupt and returns — it does NOT surface the gpio_event
+        // response, which is why we can't assert on trigger.call's result.
+        trigger.call('fire_test_event').catch(() => { /* MCU error path; not asserted here */ });
+
+        await expect(caller.call('gpio_event', 2)).rejects.toThrow(
+          'no handler registered for method: gpio_event',
+        );
+        expect(handlerInvocations).toBe(0);
+      } finally {
+        await trigger.close();
+        await caller.close();
+      }
+    });
   });
 }

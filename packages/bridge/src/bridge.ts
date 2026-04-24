@@ -268,7 +268,21 @@ export class Bridge extends EventEmitter {
       clearTimeout(pending.timer);
       this.pending.delete(msgid);
       if (error != null) {
-        pending.reject(new BridgeError(String(error)));
+        // arduino-router / Arduino RouterBridge dialect: error is a 2-tuple
+        // [code: int, message: string]. Older/foreign peers may send a bare
+        // string or a single value — fall back to String(error) in that case
+        // so we still surface something readable instead of "[object]".
+        let message: string;
+        if (
+          Array.isArray(error) &&
+          error.length >= 2 &&
+          typeof error[1] === 'string'
+        ) {
+          message = error[1];
+        } else {
+          message = String(error);
+        }
+        pending.reject(new BridgeError(message));
       } else {
         pending.resolve(result);
       }
@@ -286,11 +300,42 @@ export class Bridge extends EventEmitter {
             if (!ok) debug('send', 'response dropped (socket closed)', msgid, method);
           } catch (err: unknown) {
             const message = err instanceof Error ? err.message : String(err);
-            this.transport.write(encodeResponse(msgid as number, message, null));
+            // arduino-router / RouterBridge dialect expects [code, message].
+            // A bare string trips the MCU's decoder with "RPC Error not
+            // parsable (check type)" (err 252). Code 1 = generic application
+            // error; code 2 is the router's own "method not available" and
+            // we deliberately avoid colliding with it.
+            this.transport.write(
+              encodeResponse(msgid as number, [1, message], null),
+            );
           }
         })();
         this.activeHandlers.add(task);
         task.finally(() => this.activeHandlers.delete(task));
+      } else {
+        // No local handler for a method the router is forwarding to us. This
+        // means our providers map has drifted out of sync with the router's
+        // routing table — possible causes include idempotent provide() trusting
+        // a stale cache, a reconnect race, or a test-listen teardown that
+        // cleared the handler without unregistering on the router. Regardless
+        // of root cause, we must not silently drop the request: the caller
+        // (typically an MCU blocked on Bridge.call) would hang indefinitely.
+        // Reply with an explicit error so it unblocks and surfaces the
+        // mismatch in logs.
+        debug('recv', 'request for unregistered method', msgid, method);
+        // Error shape MUST be [code: int, message: string] to be parseable
+        // by the Arduino RouterBridge library on the MCU side — a bare
+        // string surfaces as "err 252: RPC Error not parsable (check type)"
+        // and defeats the whole point of this branch (readable diagnostics
+        // for the caller). Code 1 = generic application error; code 2 is
+        // reserved for the router's "method not available".
+        this.transport.write(
+          encodeResponse(
+            msgid as number,
+            [1, `no handler registered for method: ${method}`],
+            null,
+          ),
+        );
       }
     } else if (type === MSG_NOTIFY) {
       // Fire-and-forget from the MCU (e.g. button_pressed, sensor_threshold).

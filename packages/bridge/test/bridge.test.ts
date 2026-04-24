@@ -286,6 +286,31 @@ describe('Bridge', () => {
       expect(hits).toBe(0); // first handler was evicted
     });
 
+    it('responds with an error when the router forwards a method we have no handler for', async () => {
+      // Defensive fix: if our providers map drifts out of sync with the
+      // router's routing table, we must not silently drop inbound requests —
+      // the remote caller (typically an MCU blocked on Bridge.call) would hang
+      // indefinitely. We ship an error response so it unblocks immediately
+      // and the mismatch surfaces in logs.
+      //
+      // The wire shape of the error field MUST be [code, message] — the
+      // Arduino RouterBridge library parses it as a tuple and a bare string
+      // trips it with "err 252: RPC Error not parsable (check type)".
+      router.sendRequest(88, 'method_we_never_registered', ['anything']);
+      await new Promise((r) => setTimeout(r, 50));
+
+      const errResp = router.received.find(
+        (m) => m[0] === 1 && (m as [number, number, unknown, unknown])[1] === 88,
+      );
+      expect(errResp).toBeDefined();
+      const errField = (errResp as [number, number, unknown, unknown])[2];
+      expect(Array.isArray(errField)).toBe(true);
+      const [code, message] = errField as [number, string];
+      expect(code).toBe(1);
+      expect(typeof message).toBe('string');
+      expect(message).toContain('method_we_never_registered');
+    });
+
     it('handler errors become error responses', async () => {
       await bridge.provide('fail_method', () => {
         throw new Error('oops');
@@ -298,13 +323,14 @@ describe('Bridge', () => {
       router.sendRequest(77, 'fail_method', []);
       // Give time for async handler + response
       await new Promise((r) => setTimeout(r, 50));
-      // The error response [1, 77, "oops", null] was written back to the socket.
-      // Since MockRouter reads from clients, it will have received this response.
+      // The error response [1, 77, [1, "oops"], null] was written back to the
+      // socket. The inner tuple shape ([code, message]) is what the MCU's
+      // RouterBridge library expects — see bridge.ts error-encoding comments.
       const errResp = router.received.find(
         (m) => m[0] === 1 && (m as [number, number, unknown, unknown])[1] === 77,
       );
       expect(errResp).toBeDefined();
-      expect((errResp as [number, number, string, unknown])[2]).toBe('oops');
+      expect((errResp as [number, number, unknown, unknown])[2]).toEqual([1, 'oops']);
     });
   });
 
