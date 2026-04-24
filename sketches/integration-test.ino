@@ -53,6 +53,7 @@ template <typename RC> void printBridgeReply(RC &&rc) {
   if (rc.result(resp)) {
     String out;
     serializeJson(resp[3], out);
+    Monitor.print("result: ");
     Monitor.println(out);
   } else {
     Monitor.print("err ");
@@ -135,7 +136,7 @@ void loop() {
 
     Monitor.print("Calling gpio_event... ");
     auto rc = Bridge.call("gpio_event", 2);
-    Monitor.println("done.");
+    Monitor.println("done. Now waiting for a reply...");
     printBridgeReply(rc);
 
     set_led_state(!ledState);
