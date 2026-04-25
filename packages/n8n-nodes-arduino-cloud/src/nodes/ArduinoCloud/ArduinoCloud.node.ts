@@ -25,9 +25,10 @@ import {
   type INodeType,
   type INodeTypeDescription,
 } from 'n8n-workflow';
-// Named imports — the SDK ships no `default` export; see arduinoCloudApi.ts
-// for the full story.
-import { ApiClient, ThingsV2Api } from '@arduino/arduino-iot-client';
+// Deep-path imports — see arduinoCloudApi.ts for the full rationale (the
+// barrel pulls ~50 unused API classes due to lazy getter exports).
+import ApiClient from '@arduino/arduino-iot-client/dist/ApiClient';
+import ThingsV2Api from '@arduino/arduino-iot-client/dist/api/ThingsV2Api';
 import {
   getProperty,
   historicData,

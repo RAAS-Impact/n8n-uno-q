@@ -137,3 +137,24 @@ declare module '@arduino/arduino-iot-client' {
   // Using `import X from '@arduino/arduino-iot-client'` would resolve to
   // `undefined` under esbuild's interop and crash every SDK call at runtime.
 }
+
+// Deep-path modules. The barrel `index.js` uses lazy getters for every
+// model/API class which esbuild cannot tree-shake — importing from the
+// barrel pulls in ~50 unused API/model files (Dashboards, Triggers, OTA,
+// Tags, Templates, etc., each with their own model graphs). Importing
+// from these specific paths keeps the bundle to just what we use.
+declare module '@arduino/arduino-iot-client/dist/ApiClient' {
+  export { ApiClient as default } from '@arduino/arduino-iot-client';
+}
+
+declare module '@arduino/arduino-iot-client/dist/api/ThingsV2Api' {
+  export { ThingsV2Api as default } from '@arduino/arduino-iot-client';
+}
+
+declare module '@arduino/arduino-iot-client/dist/api/PropertiesV2Api' {
+  export { PropertiesV2Api as default } from '@arduino/arduino-iot-client';
+}
+
+declare module '@arduino/arduino-iot-client/dist/api/SeriesV2Api' {
+  export { SeriesV2Api as default } from '@arduino/arduino-iot-client';
+}

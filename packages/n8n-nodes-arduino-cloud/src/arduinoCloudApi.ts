@@ -9,16 +9,19 @@
  * call instead; the marginal cost is a tiny object allocation and it
  * removes the cross-credential race entirely.
  */
-// NB: named imports only. The SDK ships no `default` export even though its
-// index.js sets `__esModule: true`, which would make `import X from ...`
-// resolve to `undefined` at runtime under esbuild's ES-module interop and
-// crash every SDK call with "Cannot read properties of undefined".
-import {
-  ApiClient,
-  PropertiesV2Api,
-  SeriesV2Api,
-  ThingsV2Api,
-} from '@arduino/arduino-iot-client';
+// Deep-path imports rather than the barrel. The SDK's `index.js` uses lazy
+// `Object.defineProperty(exports, ..., {get})` exports for every API/model
+// class — esbuild cannot tree-shake those, so importing from the barrel
+// pulled ~50 unused API classes (Dashboards, Triggers, OTA, Tags, …) plus
+// their model graphs into the bundle. The deep paths bypass the barrel
+// and only load what's referenced.
+//
+// Each sub-module exports its class as `default`, so we use default
+// imports here. Type ambient declarations live in src/types/.
+import ApiClient from '@arduino/arduino-iot-client/dist/ApiClient';
+import ThingsV2Api from '@arduino/arduino-iot-client/dist/api/ThingsV2Api';
+import PropertiesV2Api from '@arduino/arduino-iot-client/dist/api/PropertiesV2Api';
+import SeriesV2Api from '@arduino/arduino-iot-client/dist/api/SeriesV2Api';
 import { getAccessToken, type TokenRequest } from './auth/tokenCache.js';
 import { acquireRestToken } from './restThrottle.js';
 

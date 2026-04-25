@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-arduino-cloud",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "n8n community nodes for Arduino Cloud — read and write Thing Properties, react to variable updates over MQTT, and expose properties as AI Agent tools with safety rails.",
   "files": [
     "dist",
