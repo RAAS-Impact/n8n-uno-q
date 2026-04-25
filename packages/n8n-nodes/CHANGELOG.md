@@ -4,6 +4,32 @@ All notable changes to `n8n-nodes-uno-q` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-04-25
+
+Multi-Q release: a single n8n instance can now drive several UNO Qs (locally and remotely) by assigning a different `Arduino UNO Q Router` credential to each node, including remote Qs reached over plain TCP or mTLS via the relay containers shipped under `deploy/relay/` and `deploy/relay-mtls/`.
+
+### Added
+
+- **`Arduino UNO Q Router` credential type** — replaces the implicit per-package socket path with a per-node credential. Three transport modes selectable from a dropdown:
+  - **Unix Socket (local)** — same-host, default `/var/run/arduino-router.sock`.
+  - **TCP (plain)** — Variant A relay, trusted LAN.
+  - **TCP + mTLS** — Variant C relay, untrusted networks. Three PEM fields (CA, client cert, client key) appear when *Use TLS* is on; the n8n credential store keeps the key encrypted at rest.
+  - **Test Connection** runs `$/version` over the configured transport and surfaces a transport-specific failure message (socket not found, TLS handshake failure, connection refused, …) rather than a generic error.
+- **Multi-Q workflows** — assign different credentials to different nodes in the same workflow to read sensors on one Q and fire actuators on another. The `BridgeManager` singleton now keys its connection pool by transport descriptor, refcounts subscriptions per `(descriptor, method)`, and tears each connection down independently when its subscriber count hits zero.
+- **`transport-resolver`** module that turns a credential payload into a `TransportDescriptor` consumed by the bridge, with explicit validation for the mTLS PEM trio.
+- **Diagnostic snapshots** in `BridgeManager` (entries-by-descriptor, refcounts, pending close state) for troubleshooting connection-pool issues against a remote Q.
+
+### Changed
+
+- **All four nodes** (`Arduino UNO Q Call`, `Arduino UNO Q Trigger`, `Arduino UNO Q Respond`, `Arduino UNO Q Method`) now require a credential assignment. Existing workflows configured before 0.3.0 will need a one-time credential creation per Q. *Test Connection* on the credential surfaces the same failure messages each node will produce later, so misconfiguration is caught at credential save, not at first execution.
+- Bumped `@raasimpact/arduino-uno-q-bridge` peer dependency to `^0.3.0` — required for the new TCP / mTLS transports.
+
+### Fixed
+
+- **`BridgeManager` refcount leaks** — the previous behaviour could double-decrement a refcount when a `provide` registration failed mid-handshake, eventually pinning a transport entry that should have been torn down. Refcounts now restore on every error path.
+- **Request-mode single-owner invariant** — a Trigger node configured in synchronous response mode is the only owner of its method's bridge subscription; a second node trying to claim the same method now errors at registration instead of silently sharing the channel and producing intermittent missed responses.
+- **Credential UI masking** — the TLS PEM fields render as multi-line text (not password-masked single-line), preserving whitespace exactly so the PEM parser sees what the user pasted.
+
 ## [0.2.1] — 2026-04-20
 
 ### Added
