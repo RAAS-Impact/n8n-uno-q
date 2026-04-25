@@ -1,0 +1,64 @@
+{
+  "name": "n8n-nodes-arduino-cloud",
+  "version": "0.0.0",
+  "description": "n8n community nodes for Arduino Cloud — read and write Thing Properties, react to variable updates over MQTT, and expose properties as AI Agent tools with safety rails.",
+  "files": [
+    "dist",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "tsc --noEmit && node scripts/build.mjs && node scripts/copy-assets.mjs",
+    "test": "vitest run --passWithNoTests",
+    "test:watch": "vitest"
+  },
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "credentials": [
+      "dist/credentials/ArduinoCloudOAuth2Api.credentials.js"
+    ],
+    "nodes": [
+      "dist/nodes/ArduinoCloud/ArduinoCloud.node.js",
+      "dist/nodes/ArduinoCloudTrigger/ArduinoCloudTrigger.node.js"
+    ]
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "esbuild": "^0.25.0",
+    "n8n-workflow": "^1.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "peerDependencies": {
+    "n8n-workflow": ">=1.0.0"
+  },
+  "keywords": [
+    "n8n-community-node-package",
+    "n8n",
+    "arduino",
+    "arduino-cloud",
+    "arduino-iot",
+    "iot",
+    "mqtt",
+    "ai-agent",
+    "tools-agent"
+  ],
+  "author": "Lino Moretto <lino.moretto@gmail.com>",
+  "license": "MIT",
+  "homepage": "https://github.com/raas-impact/n8n-uno-q#readme",
+  "bugs": {
+    "url": "https://github.com/raas-impact/n8n-uno-q/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/raas-impact/n8n-uno-q.git",
+    "directory": "packages/n8n-nodes-arduino-cloud"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@arduino/arduino-iot-client": "^3.0.0",
+    "arduino-iot-js": "^0.9.7",
+    "mqtt": "^4.3.8"
+  }
+}

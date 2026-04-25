@@ -45,11 +45,14 @@ rsync -av --delete -e "$SSH_CMD" \
 # discover nodes via the "n8n": { "nodes": [...] } entry in package.json.
 ssh "${SSH_OPTS[@]}" "$HOST" "rm -rf $REMOTE_BASE/n8n/custom/packages && \
   mkdir -p $REMOTE_BASE/n8n/custom/packages/bridge/dist \
-           $REMOTE_BASE/n8n/custom/packages/n8n-nodes/dist"
-rsync -av -e "$SSH_CMD" packages/bridge/package.json    "$HOST:$REMOTE_BASE/n8n/custom/packages/bridge/"
-rsync -av -e "$SSH_CMD" packages/bridge/dist/           "$HOST:$REMOTE_BASE/n8n/custom/packages/bridge/dist/"
-rsync -av -e "$SSH_CMD" packages/n8n-nodes/package.json "$HOST:$REMOTE_BASE/n8n/custom/packages/n8n-nodes/"
-rsync -av -e "$SSH_CMD" packages/n8n-nodes/dist/        "$HOST:$REMOTE_BASE/n8n/custom/packages/n8n-nodes/dist/"
+           $REMOTE_BASE/n8n/custom/packages/n8n-nodes/dist \
+           $REMOTE_BASE/n8n/custom/packages/n8n-nodes-arduino-cloud/dist"
+rsync -av -e "$SSH_CMD" packages/bridge/package.json                 "$HOST:$REMOTE_BASE/n8n/custom/packages/bridge/"
+rsync -av -e "$SSH_CMD" packages/bridge/dist/                        "$HOST:$REMOTE_BASE/n8n/custom/packages/bridge/dist/"
+rsync -av -e "$SSH_CMD" packages/n8n-nodes/package.json              "$HOST:$REMOTE_BASE/n8n/custom/packages/n8n-nodes/"
+rsync -av -e "$SSH_CMD" packages/n8n-nodes/dist/                     "$HOST:$REMOTE_BASE/n8n/custom/packages/n8n-nodes/dist/"
+rsync -av -e "$SSH_CMD" packages/n8n-nodes-arduino-cloud/package.json "$HOST:$REMOTE_BASE/n8n/custom/packages/n8n-nodes-arduino-cloud/"
+rsync -av -e "$SSH_CMD" packages/n8n-nodes-arduino-cloud/dist/        "$HOST:$REMOTE_BASE/n8n/custom/packages/n8n-nodes-arduino-cloud/dist/"
 
 # --- Reload n8n to pick up the new bundle --------------------------------
 # `up -d` reconciles config if changed; `restart` forces n8n to re-scan

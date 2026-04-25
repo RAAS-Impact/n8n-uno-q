@@ -38,6 +38,8 @@ services:
       - ../../packages/bridge/dist:/home/node/.n8n/custom/packages/bridge/dist:ro
       - ../../packages/n8n-nodes/package.json:/home/node/.n8n/custom/packages/n8n-nodes/package.json:ro
       - ../../packages/n8n-nodes/dist:/home/node/.n8n/custom/packages/n8n-nodes/dist:ro
+      - ../../packages/n8n-nodes-arduino-cloud/package.json:/home/node/.n8n/custom/packages/n8n-nodes-arduino-cloud/package.json:ro
+      - ../../packages/n8n-nodes-arduino-cloud/dist:/home/node/.n8n/custom/packages/n8n-nodes-arduino-cloud/dist:ro
     environment:
       - GENERIC_TIMEZONE=Europe/Malta
       - TZ=Europe/Malta

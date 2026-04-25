@@ -10,12 +10,13 @@ This file covers the *how*: commands, procedures, conventions. For the *why* beh
 
 ## Repo shape
 
-npm workspaces monorepo (Node ≥ 20, ESM, TypeScript). Two packages published independently:
+npm workspaces monorepo (Node ≥ 20, ESM, TypeScript). Three packages published independently:
 
 - [packages/bridge](packages/bridge/) — `@raasimpact/arduino-uno-q-bridge`, a pure Node.js MessagePack-RPC client for the UNO Q router. No n8n dependency.
 - [packages/n8n-nodes](packages/n8n-nodes/) — `n8n-nodes-uno-q`, community nodes (`UnoQCall`, `UnoQTrigger`, `UnoQRespond`, `UnoQTool`) that depend on the bridge package via workspace link.
+- [packages/n8n-nodes-arduino-cloud](packages/n8n-nodes-arduino-cloud/) — `n8n-nodes-arduino-cloud`, community nodes (`ArduinoCloud`, `ArduinoCloudTrigger`) for the hosted Arduino Cloud story. Built on the two official Arduino JS SDKs (`@arduino/arduino-iot-client` for REST, `arduino-iot-js` for MQTT-over-WSS). Disjoint from the UNO Q msgpack stack — see CONTEXT.md §13 for the orthogonality rationale and the narrow v1 wedge (Property Get/Set/GetHistory + realtime trigger, with `usableAsTool: true`, Property Guard, and Rate Limit).
 
-The n8n nodes share a process-singleton [BridgeManager](packages/n8n-nodes/src/BridgeManager.ts) that refcounts `$/register` subscriptions — this is load-bearing (see CONTEXT.md §6 "singleton client"). Do not bypass it.
+The n8n-nodes-uno-q package shares a process-singleton [BridgeManager](packages/n8n-nodes/src/BridgeManager.ts) that refcounts `$/register` subscriptions — this is load-bearing (see CONTEXT.md §6 "singleton client"). Do not bypass it. The Arduino Cloud package mirrors the pattern with its own [CloudClientManager](packages/n8n-nodes-arduino-cloud/src/cloudClientManager.ts) (one MQTT connection per credential, demuxed subscriptions) and [tokenCache](packages/n8n-nodes-arduino-cloud/src/auth/tokenCache.ts) (OAuth2 client-credentials with pre-expiry refresh and request coalescing).
 
 Supporting dirs: [experiments/](experiments/) (raw-socket smoke tests), [sketches/](sketches/) (MCU firmware used by integration tests), [deploy/](deploy/) (docker-compose + sync script for the UNO Q).
 

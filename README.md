@@ -1,11 +1,12 @@
 # n8n-uno-q
 
-n8n community nodes for the [Arduino UNO Q](https://store.arduino.cc/products/uno-q), so that workflows in n8n can read sensors, drive GPIO, call I²C devices, and react to async events coming from the on-board microcontroller.
+n8n community nodes for the [Arduino UNO Q](https://store.arduino.cc/products/uno-q) and for [Arduino Cloud](https://cloud.arduino.cc), so that workflows in n8n can read sensors, drive GPIO, call I²C devices, react to async events coming from the on-board microcontroller, and — for any Arduino Cloud-connected board, not just the UNO Q — read and write Thing Properties and fire on realtime property updates.
 
-The repo ships two npm packages:
+The repo ships three npm packages:
 
 - **[`@raasimpact/arduino-uno-q-bridge`](packages/bridge/)** — a pure Node.js MessagePack-RPC client for `arduino-router` (the Go service that runs on the Q). Zero external dependencies except `@msgpack/msgpack`. Useful on its own for anyone writing Node.js code on a UNO Q — Express, Fastify, Bun, raw scripts.
 - **[`n8n-nodes-uno-q`](packages/n8n-nodes/)** — an n8n community package that depends on the bridge and exposes four nodes: *Arduino UNO Q Call* (action), *Arduino UNO Q Trigger* (MCU → workflow events), *Arduino UNO Q Respond* (companion to Trigger's deferred-response mode), and *Arduino UNO Q Method* (callable by n8n's AI Agent, so an LLM can decide when to read a sensor or fire an actuator as part of reasoning).
+- **[`n8n-nodes-arduino-cloud`](packages/n8n-nodes-arduino-cloud/)** — an n8n community package for the hosted Arduino Cloud story, independent of the UNO Q. Exposes two nodes: *Arduino Cloud* (action, `usableAsTool`) with Property Get / Set / GetHistory plus *Property Guard* + *Rate Limit* safety rails for AI agents, and *Arduino Cloud Trigger* (realtime MQTT-over-WSS subscription to property updates). Works with every Arduino Cloud-supported board (Nano 33 IoT, MKR WiFi 1010, Portenta, UNO R4 WiFi, Nano ESP32, …), not just the UNO Q. Built on the two official Arduino JS SDKs — no bespoke wire protocol.
 
 n8n can talk to a Q **locally** (same host, unix socket) or **remotely over TCP** via a relay container. Two relay flavours ship with this repo: a plain `socat` bridge for trusted LANs (`deploy/relay/`), and a `stunnel` bridge with mutual TLS for untrusted networks (`deploy/relay-mtls/`), with a beginner-friendly PKI wrapper under [`deploy/relay-mtls/pki/`](deploy/relay-mtls/pki/) that issues the certificates for you. All three shapes share the same nodes and the same `Arduino UNO Q Router` credential type — the transport field and the optional *Use TLS* toggle pick which one.
 
@@ -235,16 +236,17 @@ Some tests in [packages/bridge/test/integration.test.ts](packages/bridge/test/in
 ## Repo layout
 
 ```
-packages/bridge       → @raasimpact/arduino-uno-q-bridge (Node ↔ arduino-router)
-packages/n8n-nodes    → n8n-nodes-uno-q (n8n community nodes)
-deploy/n8n/           → docker-compose (prod base + dev override) for n8n on the Q
-deploy/relay/         → Variant A: plain socat TCP-to-unix-socket relay
-deploy/relay-mtls/    → Variant C: stunnel + mTLS relay
-deploy/relay-mtls/pki → openssl wrapper that issues the mTLS certs
-deploy/lib/           → shared install-script helpers (SSH multiplexing)
-deploy/sync.sh        → build + rsync + reload helper for the n8n custom-nodes bundle
-experiments/          → raw-socket smoke tests against a real Q
-sketches/             → MCU firmware used by integration tests
+packages/bridge                 → @raasimpact/arduino-uno-q-bridge (Node ↔ arduino-router)
+packages/n8n-nodes              → n8n-nodes-uno-q (UNO Q community nodes)
+packages/n8n-nodes-arduino-cloud → n8n-nodes-arduino-cloud (Arduino Cloud community nodes)
+deploy/n8n/                     → docker-compose (prod base + dev override) for n8n on the Q
+deploy/relay/                   → Variant A: plain socat TCP-to-unix-socket relay
+deploy/relay-mtls/              → Variant C: stunnel + mTLS relay
+deploy/relay-mtls/pki           → openssl wrapper that issues the mTLS certs
+deploy/lib/                     → shared install-script helpers (SSH multiplexing)
+deploy/sync.sh                  → build + rsync + reload helper for the n8n custom-nodes bundle
+experiments/                    → raw-socket smoke tests against a real Q
+sketches/                       → MCU firmware used by integration tests
 ```
 
 ---
