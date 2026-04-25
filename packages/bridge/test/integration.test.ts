@@ -14,13 +14,13 @@
  *        ssh -N -L /tmp/arduino-router.sock:/var/run/arduino-router.sock arduino@linucs.local &
  *        UNOQ_SOCKET=/tmp/arduino-router.sock npm run test:integration -w packages/bridge
  *
- *   B. TCP (Variant A relay — CONTEXT.md §12.5.1, §12.7 step 1):
+ *   B. TCP (Variant A relay — docs/master-plan/12-multi-q.md §12.5.1, §12.7 step 1):
  *        On the Q:  cd ~/relay && docker compose up -d
  *        On the PC: ssh -N -L 5775:localhost:5775 arduino@linucs.local &
  *                   UNOQ_TCP_HOST=127.0.0.1 UNOQ_TCP_PORT=5775 \
  *                     npm run test:integration -w packages/bridge
  *
- *   C. TLS (Variant C mTLS relay — CONTEXT.md §12.5.3):
+ *   C. TLS (Variant C mTLS relay — docs/master-plan/12-multi-q.md §12.5.3):
  *        UNOQ_TLS_HOST must be a name/IP covered by the server cert's SAN —
  *        usually the hostname you passed to `./pki add device <nick>` (default
  *        <nick>.local). Using 127.0.0.1 through an SSH tunnel will fail the

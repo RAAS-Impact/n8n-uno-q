@@ -2,7 +2,7 @@
 
 A TLS-terminating proxy in front of `arduino-router`'s Unix socket. Requires a client certificate signed by your home CA before it will forward a single byte. Appropriate when the LAN is untrusted and you don't want a WireGuard overlay.
 
-See [CONTEXT.md §12.5.3](../../CONTEXT.md#1253-variant-c--stunnel--mtls) for the full design.
+See [docs/master-plan/12-multi-q.md §12.5.3](../../docs/master-plan/12-multi-q.md#1253-variant-c--stunnel--mtls) for the full design.
 
 ## When to use this vs Variant A
 
@@ -184,4 +184,4 @@ Both `install.sh` and `uninstall.sh` source [../lib/ssh-multiplex.sh](../lib/ssh
 - [pki/README.md](pki/README.md) — cert issuance in detail, including when to migrate to `step-ca`.
 - [../relay/README.md](../relay/README.md) — Variant A (plain socat) for trusted LANs.
 - [../sync.sh](../sync.sh) — n8n custom-nodes sync; syncs the relay's compose files as a side effect but does **not** start the container.
-- [CONTEXT.md §12.5.3](../../CONTEXT.md#1253-variant-c--stunnel--mtls) — design rationale, security model, rejected alternatives.
+- [docs/master-plan/12-multi-q.md §12.5.3](../../docs/master-plan/12-multi-q.md#1253-variant-c--stunnel--mtls) — design rationale, security model, rejected alternatives.

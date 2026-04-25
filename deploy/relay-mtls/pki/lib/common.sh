@@ -9,7 +9,7 @@ DEVICES_DIR="$OUT_DIR/devices"
 N8N_DIR="$OUT_DIR/n8n"
 LEDGER="$PKI_DIR/certs.tsv"
 
-# Validity periods (days). Match CONTEXT.md §12.5.3 defaults.
+# Validity periods (days). Match docs/master-plan/12-multi-q.md §12.5.3 defaults.
 CA_DAYS=3650       # 10 years
 SERVER_DAYS=730    # 2 years
 CLIENT_DAYS=730    # 2 years

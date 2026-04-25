@@ -68,7 +68,7 @@ export interface BridgeOptions {
 }
 
 /**
- * Per-call options for `callWithOptions`. See CONTEXT.md §6.4 for the full
+ * Per-call options for `callWithOptions`. See docs/master-plan/06-package-n8n-nodes.md §6.4 for the full
  * retry contract; the short version lives next to callWithOptions below.
  */
 export interface CallOptions {
@@ -380,7 +380,7 @@ export class Bridge extends EventEmitter {
   /**
    * Call a remote method with explicit per-call options.
    *
-   * Retry contract (CONTEXT.md §6.4):
+   * Retry contract (docs/master-plan/06-package-n8n-nodes.md §6.4):
    * - On `ConnectionError` (mid-call OR at call start, when the bridge is in
    *   a known-disconnected state) AND only if `idempotent: true`: race the
    *   bridge's 'reconnect' event against the remaining `timeoutMs` budget.

@@ -4,7 +4,7 @@ A minimal socket-to-TCP bridge that exposes `arduino-router`'s Unix socket on a 
 
 **No authentication, no encryption.** Use this only on a trusted LAN. If the network isn't trusted, use [../relay-mtls/](../relay-mtls/) (Variant C — stunnel + mTLS) instead. The two variants can't run on the same port simultaneously; pick one.
 
-See [CONTEXT.md §12.5.1](../../CONTEXT.md#1251-variant-a--socat-only-step-1-deliverable) for the full design.
+See [docs/master-plan/12-multi-q.md §12.5.1](../../docs/master-plan/12-multi-q.md#1251-variant-a--socat-only-step-1-deliverable) for the full design.
 
 ## What's in this directory
 
@@ -109,4 +109,4 @@ Both `install.sh` and `uninstall.sh` source [../lib/ssh-multiplex.sh](../lib/ssh
 
 - [../relay-mtls/README.md](../relay-mtls/README.md) — Variant C (stunnel + mTLS). Use this when the LAN is untrusted.
 - [../sync.sh](../sync.sh) — syncs the n8n container's custom-nodes bundle; syncs the compose files for *both* relays as a side effect but does **not** start them.
-- [CONTEXT.md §12.5.1](../../CONTEXT.md#1251-variant-a--socat-only-step-1-deliverable) — design rationale, rejected alternatives.
+- [docs/master-plan/12-multi-q.md §12.5.1](../../docs/master-plan/12-multi-q.md#1251-variant-a--socat-only-step-1-deliverable) — design rationale, rejected alternatives.

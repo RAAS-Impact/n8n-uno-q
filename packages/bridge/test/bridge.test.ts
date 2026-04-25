@@ -391,7 +391,7 @@ describe('Bridge', () => {
   // into the reconnected socket with a stale msgid or waits for a workflow
   // Respond that may never come. Expected behaviour: bridge emits a
   // `disconnect` event carrying the reason so consumers can clean up.
-  // The retry contract from CONTEXT.md §6.4 "Capability metadata and retry contract":
+  // The retry contract from docs/master-plan/06-package-n8n-nodes.md §6.4 "Capability metadata and retry contract":
   //
   // - callWithOptions(method, params[], { idempotent: true }) retries ONCE on
   //   ConnectionError mid-call, gated by Promise.race(reconnect, remaining budget).

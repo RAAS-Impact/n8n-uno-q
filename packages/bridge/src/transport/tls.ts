@@ -15,7 +15,7 @@ export interface TlsTransportOptions {
 
 /**
  * mTLS transport — used to reach a remote UNO Q via the Variant C stunnel
- * relay (see CONTEXT.md §12.5.3). Reuses the shared SocketTransport base
+ * relay (see docs/master-plan/12-multi-q.md §12.5.3). Reuses the shared SocketTransport base
  * because a tls.TLSSocket IS a net.Socket — only the ready-event name and
  * the socket constructor differ from plain TCP.
  *

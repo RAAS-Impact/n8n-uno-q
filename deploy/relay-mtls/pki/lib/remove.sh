@@ -1,6 +1,6 @@
 # `./pki remove <nickname>` — mark a cert decommissioned and delete its files.
 #
-# This is bookkeeping: stunnel has no CRL in this setup (see CONTEXT.md §12.5.3
+# This is bookkeeping: stunnel has no CRL in this setup (see docs/master-plan/12-multi-q.md §12.5.3
 # open items — "Revocation"), so removal here simply means the cert bundle is
 # gone from disk and the ledger shows the nickname as 'removed'. Anyone who
 # still has the key can keep authenticating until it expires.

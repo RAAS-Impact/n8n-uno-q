@@ -3,7 +3,7 @@
  *
  * The credential describes *where* to reach a router (unix socket or TCP host+
  * port) and lets a single n8n workflow drive multiple Qs by assigning a
- * different credential to each node. See CONTEXT.md §12.4 for the full design.
+ * different credential to each node. See docs/master-plan/12-multi-q.md §12.4 for the full design.
  *
  * Test Connection is wired via a node method (`methods.credentialTest.
  * unoQRouterApiTest` on the UnoQCall node) — msgpack-rpc isn't HTTP, so n8n's
@@ -41,7 +41,7 @@ export class UnoQRouterApi implements ICredentialType {
           name: 'TCP (remote — relay container, Tailscale, LAN)',
           value: 'tcp',
           description:
-            'Connect to a Q across the network via its relay container (CONTEXT.md §12.5).',
+            'Connect to a Q across the network via its relay container.',
         },
       ],
       description:

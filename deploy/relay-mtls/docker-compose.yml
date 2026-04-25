@@ -13,11 +13,11 @@ services:
       # Variant C side-by-side on the same host.
       - "${UNOQ_RELAY_BIND:-0.0.0.0}:${UNOQ_RELAY_PORT:-5775}:5775"
     volumes:
-      # Directory mount — see CONTEXT.md §12.5.1 for the rationale (same
+      # Directory mount — see docs/master-plan/12-multi-q.md §12.5.1 for the rationale (same
       # docker file-bind-mount issue as the socat relay, resolved the same
       # way). stunnel dials through /host/var/run/arduino-router.sock.
       - /var/run:/host/var/run:rw
       # Operator supplies ca.pem, server.pem, server.key under ./certs/
-      # before bringing the container up. See CONTEXT.md §12.5.3 for the
+      # before bringing the container up. See docs/master-plan/12-multi-q.md §12.5.3 for the
       # openssl bootstrap commands.
       - ./certs:/etc/stunnel/certs:ro

@@ -5,7 +5,7 @@ services:
     restart: unless-stopped
     ports:
       # Binding defaults to all interfaces (0.0.0.0) — the "trusted-LAN"
-      # deployment shape from CONTEXT.md §12.5.1: n8n on another machine on
+      # deployment shape from docs/master-plan/12-multi-q.md §12.5.1: n8n on another machine on
       # the same LAN talks to the Q directly over TCP. There is no auth on
       # this path; only deploy with the default on networks you already
       # trust.

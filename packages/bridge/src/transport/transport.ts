@@ -24,7 +24,7 @@ export type TransportDescriptor =
   /**
    * TLS with client-certificate authentication (mTLS). ca/cert/key are PEM
    * strings. Used to reach a remote UNO Q via the Variant C stunnel relay
-   * when the LAN is untrusted. See CONTEXT.md §12.5.3.
+   * when the LAN is untrusted. See docs/master-plan/12-multi-q.md §12.5.3.
    */
   | {
       kind: 'tls';
