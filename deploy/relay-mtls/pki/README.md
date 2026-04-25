@@ -23,13 +23,31 @@ That's it. Each `add` command prints exactly which files to copy where.
 
 | Command | What it does |
 |---|---|
-| `./pki setup` | Creates your home CA (the "root identity" that signs everything else). Run once. |
-| `./pki add device <nick> [--hostname H] [--ip I]` | Issues a **server** cert for a Q. Default hostname is `<nick>.local` — see [Picking the right hostname (or IP) for a device](#picking-the-right-hostname-or-ip-for-a-device) below for when to override with `--hostname` / `--ip`. |
-| `./pki add n8n <nick>` | Issues a **client** cert for an n8n instance. |
+| `./pki setup [--days N]` | Creates your home CA (the "root identity" that signs everything else). Run once. |
+| `./pki add device <nick> [--hostname H] [--ip I] [--days N]` | Issues a **server** cert for a Q. Default hostname is `<nick>.local` — see [Picking the right hostname (or IP) for a device](#picking-the-right-hostname-or-ip-for-a-device) below for when to override with `--hostname` / `--ip`. |
+| `./pki add n8n <nick> [--days N]` | Issues a **client** cert for an n8n instance. |
 | `./pki list` | Shows all active certs and their expiry dates. |
 | `./pki show <nick> [-v]` | Shows details (subject, issuer, SAN, EKU, expiry, SHA-256 fingerprint) of one cert. Use `ca` for the home CA. Add `-v` for the full `openssl x509 -text` dump. |
 | `./pki remove <nick>` | Deletes the cert files and marks the entry removed in the ledger. |
 | `./pki help` | Prints help. |
+
+## Cert validity
+
+Every cert (CA and leaf) defaults to **10 years (3650 days)**. The mTLS setup here has no CRL — revocation is bookkeeping only — so leaning on long expiry plus cheap re-bootstrap is the policy. You can override per cert via `--days N` on the CLI, or per invocation via env vars:
+
+- `CA_DAYS` — used by `./pki setup`
+- `SERVER_DAYS` — used by `./pki add device` (CA-signed *server* cert)
+- `CLIENT_DAYS` — used by `./pki add n8n` (CA-signed *client* cert)
+
+Examples:
+
+```bash
+./pki add device kitchen --days 90              # short-lived device cert
+./pki add n8n laptop --days 180                 # 6-month n8n cert
+SERVER_DAYS=365 ./pki add device garage         # env-var override (one-shot)
+```
+
+If you want to harden the policy and force every issuance to use a shorter lifetime, set the env var in your shell profile.
 
 ## Picking the right hostname (or IP) for a device
 
@@ -137,7 +155,7 @@ The **Test Connection** button will do a TLS handshake against your Q and call `
 
 ## Renewing expired certs
 
-Default validities: CA 10 years, device + n8n certs 2 years each. When an `./pki list` row shows `(in 2 months)` or similar, re-issue the cert:
+Default validity for every cert (CA, device, n8n) is 10 years. When an `./pki list` row shows `(in 2 months)` or similar, re-issue the cert:
 
 ```bash
 ./pki remove kitchen
@@ -209,7 +227,7 @@ Install it: `brew install openssl` (macOS) or `apt install openssl` (Debian/Ubun
 
 For anyone reading the scripts:
 
-- CA key is 4096-bit RSA, leaf keys are 2048-bit. Standard home-fleet sizing — a CA lives longer so err on the generous side; leaf cert keys rotate every 2 years so 2048 is plenty.
+- CA key is 4096-bit RSA, leaf keys are 2048-bit. Standard home-fleet sizing — a CA lives longer so err on the generous side; leaf keys default to 10-year validity, but you can pin a shorter lifetime per cert via `--days`.
 - Server certs carry `extendedKeyUsage = serverAuth` and a `subjectAltName` matching the hostname/IP. Client certs carry `extendedKeyUsage = clientAuth` and no SAN (the server doesn't hostname-verify the client).
 - Private keys are chmod'd to `0600`; certs to `0644`.
 - No `openssl.cnf` customisation — each signing operation passes an ad-hoc extension file to `openssl x509 -req -extfile …`.

@@ -1,0 +1,24 @@
+services:
+  unoq-relay-ssh:
+    build: .
+    image: ghcr.io/raasimpact/unoq-relay-ssh:latest
+    restart: unless-stopped
+    # No `ports:` stanza — this is an outbound-only client. The container
+    # initiates an SSH connection to N8N_HOST:N8N_SSH_PORT; nothing on the
+    # Q's LAN connects to this container.
+    environment:
+      # Set by install.sh via the .env file alongside this compose file.
+      # Override by editing $UNOQ_BASE/relay-ssh/.env on the Q and re-running
+      # `docker compose up -d`.
+      N8N_HOST: "${N8N_HOST}"
+      N8N_SSH_PORT: "${N8N_SSH_PORT:-2222}"
+      REMOTE_BIND_PORT: "${REMOTE_BIND_PORT:-7000}"
+    volumes:
+      # Directory mount — see docs/master-plan/12-multi-q.md §12.5.1 for the
+      # rationale (same docker file-bind-mount issue as the other relays,
+      # resolved the same way). autossh's -R forwards the n8n-side port to
+      # /host/var/run/arduino-router.sock.
+      - /var/run:/host/var/run:rw
+      # install.sh populates ./certs/ with id_ed25519, id_ed25519-cert.pub,
+      # and n8n_host.pub (the pinned host pubkey of the n8n endpoint).
+      - ./certs:/etc/relay-ssh:ro

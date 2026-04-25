@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+#
+# pki — tiny ssh-keygen wrapper for the reverse-SSH relay (relay-ssh).
+#
+# Usage: ./pki <command> [args]
+#   setup                       First-time: creates the user CA
+#   add device <nick>           Issues a user cert for a Q (autossh client identity)
+#   add n8n <nick>              Generates a host keypair for an n8n SSH endpoint (no cert — pinned)
+#   list                        Shows all issued material
+#   show <nick> [-v]            Shows details of one cert/keypair
+#   remove <nick>               Marks an entry decommissioned (bookkeeping only — no CRL in v1)
+#   help                        This help
+#
+# Design goal: a beginner with no PKI background can run setup + add device +
+# add n8n and have a working reverse-SSH tunnel. Every ssh-keygen concept
+# (principals, KeyID, extensions) is hidden behind defaults derived from the
+# nickname and the §14.3 spec.
+set -euo pipefail
+
+PKI_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/common.sh
+source "$PKI_DIR/lib/common.sh"
+
+cmd="${1:-help}"
+shift || true
+
+case "$cmd" in
+  setup)
+    # shellcheck source=lib/setup.sh
+    source "$PKI_DIR/lib/setup.sh"
+    setup_cmd "$@"
+    ;;
+  add)
+    # shellcheck source=lib/add.sh
+    source "$PKI_DIR/lib/add.sh"
+    add_cmd "$@"
+    ;;
+  list|ls)
+    # shellcheck source=lib/list.sh
+    source "$PKI_DIR/lib/list.sh"
+    list_cmd "$@"
+    ;;
+  show)
+    # shellcheck source=lib/show.sh
+    source "$PKI_DIR/lib/show.sh"
+    show_cmd "$@"
+    ;;
+  remove|rm)
+    # shellcheck source=lib/remove.sh
+    source "$PKI_DIR/lib/remove.sh"
+    remove_cmd "$@"
+    ;;
+  help|--help|-h|"")
+    print_help
+    ;;
+  *)
+    err "Unknown command: $cmd"
+    print_help
+    exit 1
+    ;;
+esac

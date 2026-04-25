@@ -13,7 +13,7 @@ npm run build
 
 # --- Sync deploy units to the Q ------------------------------------------
 # One rsync per unit, each `--delete` scoped to its own target dir so nothing
-# outside REMOTE_BASE/{n8n,relay,relay-mtls}/ can ever be touched — a top-
+# outside REMOTE_BASE/{n8n,relay,relay-mtls,relay-ssh}/ can ever be touched — a top-
 # level rsync with --delete against $REMOTE_BASE would wipe the user's
 # entire home of anything not present in ./deploy/. Don't do that.
 #
@@ -26,8 +26,10 @@ npm run build
 #   - n8n/custom/         → bind-mounted packages, rewritten below
 #   - n8n/local-files/    → user-accessible files inside workflows
 #   - relay-mtls/certs/   → operator-supplied CA + cert + key
+#   - relay-ssh/certs/    → operator-supplied user cert + key + host_ca.pub
+#   - relay-ssh/.env      → install.sh writes N8N_HOST/N8N_SSH_PORT here
 # macOS rsync 2.6.9 (Apple default) lacks --mkpath; pre-create dirs via ssh.
-ssh "${SSH_OPTS[@]}" "$HOST" "mkdir -p $REMOTE_BASE/n8n $REMOTE_BASE/relay $REMOTE_BASE/relay-mtls"
+ssh "${SSH_OPTS[@]}" "$HOST" "mkdir -p $REMOTE_BASE/n8n $REMOTE_BASE/relay $REMOTE_BASE/relay-mtls $REMOTE_BASE/relay-ssh"
 
 rsync -av --delete -e "$SSH_CMD" \
   --exclude custom --exclude local-files \
@@ -39,6 +41,10 @@ rsync -av --delete -e "$SSH_CMD" \
 rsync -av --delete -e "$SSH_CMD" \
   --exclude certs \
   ./deploy/relay-mtls/q/ "$HOST:$REMOTE_BASE/relay-mtls/"
+
+rsync -av --delete -e "$SSH_CMD" \
+  --exclude certs --exclude .env \
+  ./deploy/relay-ssh/q/ "$HOST:$REMOTE_BASE/relay-ssh/"
 
 # --- Sync built packages into n8n's custom/ ------------------------------
 # Wipe first: n8n scans custom/ recursively for *.node.js, so any stale files
@@ -59,9 +65,9 @@ rsync -av -e "$SSH_CMD" packages/n8n-nodes-arduino-cloud/dist/        "$HOST:$RE
 # --- Reload n8n to pick up the new bundle --------------------------------
 # `up -d` reconciles config if changed; `restart` forces n8n to re-scan
 # custom/ after rsync. The relay containers are deployed manually by the
-# user via deploy/relay/install.sh or deploy/relay-mtls/install.sh — they
-# are NOT started or restarted here even though their compose files were
-# synced above.
+# user via deploy/relay/install.sh, deploy/relay-mtls/install.sh, or
+# deploy/relay-ssh/install.sh — they are NOT started or restarted here
+# even though their compose files were synced above.
 ssh "${SSH_OPTS[@]}" "$HOST" "cd $REMOTE_BASE/n8n && \
   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d n8n && \
   docker compose -f docker-compose.yml -f docker-compose.dev.yml restart n8n"

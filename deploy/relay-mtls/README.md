@@ -153,15 +153,13 @@ A successful handshake prints the TLS version and cipher, then hangs waiting for
 
 ## Renewing certs before they expire
 
-Defaults: 2 years for both server and client certs. When a cert is about to expire:
+Default validity for every cert (CA, server, client) is **10 years**. To pin a shorter lifetime, pass `--days N` to `pki add device|n8n`, or set `SERVER_DAYS` / `CLIENT_DAYS` / `CA_DAYS` per invocation. When a cert is about to expire:
 
 ```bash
 ./pki/pki remove kitchen
 ./pki/pki add device kitchen
 ./install.sh --device kitchen
 ```
-
-The CA itself is valid for 10 years — you won't touch it for most of its life.
 
 ## Troubleshooting
 

@@ -29,16 +29,18 @@ add_device() {
   require_openssl
   require_ca
 
-  local nick="" hostname="" ip=""
+  local nick="" hostname="" ip="" days="$SERVER_DAYS"
   while [ $# -gt 0 ]; do
     case "$1" in
       --hostname) hostname="$2"; shift 2 ;;
       --hostname=*) hostname="${1#*=}"; shift ;;
       --ip) ip="$2"; shift 2 ;;
       --ip=*) ip="${1#*=}"; shift ;;
+      --days) days="$2"; shift 2 ;;
+      --days=*) days="${1#*=}"; shift ;;
       -*)
         err "Unknown option: $1"
-        hint "Valid: --hostname <H>, --ip <I>"
+        hint "Valid: --hostname <H>, --ip <I>, --days <N>"
         exit 1
         ;;
       *)
@@ -51,6 +53,9 @@ add_device() {
   done
 
   validate_nickname "$nick" || exit 1
+  if ! printf '%s' "$days" | grep -Eq '^[1-9][0-9]*$'; then
+    err "Invalid --days value: $days (must be a positive integer)"; exit 1
+  fi
 
   # mDNS is the 80% case for home LAN setups — the Q advertises <hostname>.local
   # via avahi, so connections to that name resolve automatically. Operators
@@ -75,7 +80,7 @@ add_device() {
     --cn          "$nick" \
     --out-dir     "$dir" \
     --out-name    server \
-    --days        "$SERVER_DAYS" \
+    --days        "$days" \
     --hostname    "$hostname" \
     --ip          "$ip"
 
@@ -86,7 +91,7 @@ add_device() {
 
   local issued expires
   issued="$(today_iso)"
-  expires="$(days_from_now "$SERVER_DAYS")"
+  expires="$(days_from_now "$days")"
   ledger_add "$nick" "device" "$issued" "$expires" "out/devices/$nick"
 
   ok "Device '$nick' ready."
@@ -107,8 +112,29 @@ add_n8n() {
   require_openssl
   require_ca
 
-  local nick="${1:-}"
+  local nick="" days="$CLIENT_DAYS"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --days) days="$2"; shift 2 ;;
+      --days=*) days="${1#*=}"; shift ;;
+      -*)
+        err "Unknown option: $1"
+        hint "Valid: --days <N>"
+        exit 1
+        ;;
+      *)
+        if [ -z "$nick" ]; then nick="$1"; else
+          err "Unexpected extra argument: $1"; exit 1
+        fi
+        shift
+        ;;
+    esac
+  done
+
   validate_nickname "$nick" || exit 1
+  if ! printf '%s' "$days" | grep -Eq '^[1-9][0-9]*$'; then
+    err "Invalid --days value: $days (must be a positive integer)"; exit 1
+  fi
 
   if ledger_has_active "$nick" "n8n"; then
     err "An n8n identity called '$nick' already exists."
@@ -127,14 +153,14 @@ add_n8n() {
     --cn        "$nick" \
     --out-dir   "$dir" \
     --out-name  client \
-    --days      "$CLIENT_DAYS"
+    --days      "$days"
 
   cp "$CA_DIR/ca.pem" "$dir/ca.pem"
   chmod 644 "$dir/ca.pem"
 
   local issued expires
   issued="$(today_iso)"
-  expires="$(days_from_now "$CLIENT_DAYS")"
+  expires="$(days_from_now "$days")"
   ledger_add "$nick" "n8n" "$issued" "$expires" "out/n8n/$nick"
 
   ok "n8n identity '$nick' ready."

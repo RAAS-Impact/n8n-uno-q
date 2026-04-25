@@ -1,0 +1,5 @@
+# CA private keys, issued cert bundles, and the ledger are user-local —
+# never commit. The lib/ scripts and the dispatcher are tracked normally.
+ca/
+out/
+certs.tsv

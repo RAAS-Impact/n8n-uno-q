@@ -8,7 +8,7 @@ The repo ships three npm packages:
 - **[`n8n-nodes-uno-q`](packages/n8n-nodes/)** — an n8n community package that depends on the bridge and exposes four nodes: *Arduino UNO Q Call* (action), *Arduino UNO Q Trigger* (MCU → workflow events), *Arduino UNO Q Respond* (companion to Trigger's deferred-response mode), and *Arduino UNO Q Method* (callable by n8n's AI Agent, so an LLM can decide when to read a sensor or fire an actuator as part of reasoning).
 - **[`n8n-nodes-arduino-cloud`](packages/n8n-nodes-arduino-cloud/)** — an n8n community package for the hosted Arduino Cloud story, independent of the UNO Q. Exposes two nodes: *Arduino Cloud* (action, `usableAsTool`) with Property Get / Set / GetHistory plus *Property Guard* + *Rate Limit* safety rails for AI agents, and *Arduino Cloud Trigger* (realtime MQTT-over-WSS subscription to property updates). Works with every Arduino Cloud-supported board (Nano 33 IoT, MKR WiFi 1010, Portenta, UNO R4 WiFi, Nano ESP32, …), not just the UNO Q. Built on the two official Arduino JS SDKs — no bespoke wire protocol.
 
-n8n can talk to a Q **locally** (same host, unix socket) or **remotely over TCP** via a relay container. Two relay flavours ship with this repo: a plain `socat` bridge for trusted LANs (`deploy/relay/`), and a `stunnel` bridge with mutual TLS for untrusted networks (`deploy/relay-mtls/`), with a beginner-friendly PKI wrapper under [`deploy/relay-mtls/pki/`](deploy/relay-mtls/pki/) that issues the certificates for you. All three shapes share the same nodes and the same `Arduino UNO Q Router` credential type — the transport field and the optional *Use TLS* toggle pick which one.
+n8n can talk to a Q **locally** (same host, unix socket) or **remotely** via one of three relay shapes. A plain `socat` bridge for trusted LANs (`deploy/relay/`); a `stunnel` bridge with mutual TLS for untrusted networks (`deploy/relay-mtls/`), with a beginner-friendly PKI wrapper under [`deploy/relay-mtls/pki/`](deploy/relay-mtls/pki/); and a reverse-SSH tunnel for Qs behind NAT (`deploy/relay-ssh/`), where the device dials *out* to n8n instead of n8n dialing *in*. The first two share the `Arduino UNO Q Router` credential and the *Transport* / *Use TLS* fields; the reverse-SSH variant uses a separate `Arduino UNO Q SSH Relay` credential.
 
 For AI-agent workflows touching actuators, read the bridge's [Retry and idempotency](packages/bridge/README.md#retry-and-idempotency) section before wiring up a Method node. The `idempotent` checkbox decides whether the bridge auto-retries a mid-call socket drop (keeps relays from firing twice), the optional **Method Guard** lets you reject calls at the gate — by parameter value, time of day, or any other predicate — before they reach the MCU, and the optional **Rate Limit** caps how often the LLM may invoke the tool (minute/hour/day) to protect a constrained device from eager agents.
 
@@ -51,12 +51,13 @@ Done. The *Arduino UNO Q Call*, *Arduino UNO Q Trigger*, *Arduino UNO Q Respond*
 
 When n8n runs on your laptop, home server, or any box that isn't the Q, the `arduino-router` unix socket isn't reachable. A relay container on the Q bridges the gap: it mounts the router socket and exposes it as a TCP endpoint n8n can connect to.
 
-**Pick one of two flavours** depending on how much you trust the network between n8n and the Q:
+**Pick one of three flavours** depending on the network shape and whether the Q has a public IP:
 
-| Variant | When | Auth + encryption |
-|---|---|---|
-| [**A — plain socat**](deploy/relay/) | Trusted LAN. Home WiFi behind a router you control. | None — wire-level plaintext. |
-| [**C — stunnel + mTLS**](deploy/relay-mtls/) | Anything else: untrusted WiFi, mixed-tenant networks, internet path. | Mutual TLS. The relay only accepts clients presenting a certificate signed by your local CA. |
+| Variant | When | Auth + encryption | Direction |
+|---|---|---|---|
+| [**A — plain socat**](deploy/relay/) | Trusted LAN. Home WiFi behind a router you control. | None — wire-level plaintext. | n8n → Q (TCP) |
+| [**B — reverse SSH**](deploy/relay-ssh/) | Q behind NAT, no public IP, no port forwarding. The most common home/branch-office shape. | SSH user-cert PKI (two CAs). The Q dials out; n8n's auth callback verifies the cert before accepting the tunnel. | Q → n8n (outbound only) |
+| [**C — stunnel + mTLS**](deploy/relay-mtls/) | Q has a routable address but the path between is untrusted (mixed-tenant networks, internet path). | Mutual TLS — the relay only accepts clients presenting a certificate signed by your local CA. | n8n → Q (TCP) |
 
 Each has its own README with install / uninstall commands; quick pointers follow.
 
@@ -92,6 +93,30 @@ The relay listens on TCP port `5775` bound to `0.0.0.0` by default. Override via
 - `UNOQ_RELAY_BIND=192.168.1.42` — bind to a specific NIC.
 - `UNOQ_RELAY_PORT=6000` — pick a different port.
 
+### Variant B — reverse SSH (Q behind NAT)
+
+The Q dials *out* to your n8n host; n8n reaches the Q through that established channel. No public IP or port-forwarding on the Q's network — only outbound SSH.
+
+The n8n side is **not a separate container** — the SSH server runs inside the n8n process itself (singleton on `globalThis`, same pattern as `BridgeManager`). You make a TCP port reachable on the n8n host, paste the host bundle into a credential, and you're done.
+
+```bash
+# One time: create the two CAs (user CA signs device certs, host CA signs the n8n host cert).
+./deploy/relay-ssh/pki/pki setup
+
+# Per n8n endpoint: issue a host cert. The hostname must be reachable from each Q.
+./deploy/relay-ssh/pki/pki add n8n laptop --hostname n8n.example.com
+
+# Per Q: issue a user cert (KeyID = the routing key on the n8n side).
+./deploy/relay-ssh/pki/pki add device kitchen
+
+# Deploy the autossh container + device bundle to the Q.
+./deploy/relay-ssh/install.sh --device kitchen --n8n-host n8n.example.com --host arduino@<q-hostname>
+```
+
+The Q's autossh container has no exposed ports — it's outbound-only. On the n8n host, make TCP `2222` (or whatever **Listen port** you set in the credential) reachable from wherever the Qs sit, then paste the contents of `deploy/relay-ssh/pki/out/n8n/laptop/{ssh_host_ed25519_key,ssh_host_ed25519_key-cert.pub,user_ca.pub}` into the n8n credential and set **Device nickname** to `kitchen`.
+
+The [relay-ssh README](deploy/relay-ssh/README.md) and [n8n-server notes](deploy/relay-ssh/n8n-server/README.md) walk through reachability options and the credential paste flow. The [PKI README](deploy/relay-ssh/pki/README.md) covers cert renewal and the `revoked_serials` flow.
+
 ### Variant C — stunnel + mTLS (untrusted network)
 
 mTLS-authenticated; every client presents a certificate the relay checks against your CA. Requires the repo cloned locally for the PKI wrapper.
@@ -114,10 +139,12 @@ The [PKI README](deploy/relay-mtls/pki/README.md) walks through every step, incl
 
 ### In n8n
 
-Create an `Arduino UNO Q Router` credential with *Transport* = **TCP**, *Host* = the Q's hostname or IP, *Port* = `5775`.
+For **Variants A and C**, create an `Arduino UNO Q Router` credential with *Transport* = **TCP**, *Host* = the Q's hostname or IP, *Port* = `5775`.
 
 - For **Variant A**: leave *Use TLS (mTLS)* off. *Test Connection* should report the router version.
 - For **Variant C**: toggle *Use TLS (mTLS)* on, paste the contents of `deploy/relay-mtls/pki/out/n8n/<nick>/ca.pem`, `client.pem`, `client.key` into the three PEM fields. *Test Connection* runs the full TLS handshake plus `$/version`.
+
+For **Variant B** (reverse SSH), create an `Arduino UNO Q SSH Relay` credential instead. Set *Device nickname* = `<nick>` (matching `./pki add device <nick>`), *Listen port* = `2222`, then paste `ssh_host_ed25519_key`, `ssh_host_ed25519_key-cert.pub`, and `user_ca.pub` from `deploy/relay-ssh/pki/out/n8n/<nick>/`. *Test Connection* looks up the device in the in-process registry and calls `$/version` through the tunnel.
 
 From then on the nodes behave exactly like in the same-host setup — just assign the credential.
 
@@ -245,6 +272,10 @@ deploy/relay/                   → Variant A: plain socat TCP-to-unix-socket re
 deploy/relay-mtls/              → Variant C: stunnel + mTLS relay
   q/                            →   container assets shipped to the Q (Dockerfile, compose, stunnel.conf, certs/)
   pki/                          →   openssl wrapper that issues the mTLS certs (PC-only)
+deploy/relay-ssh/               → Variant B: reverse-SSH relay (Q dials out to n8n)
+  q/                            →   container assets shipped to the Q (Dockerfile, compose, autossh entrypoint, certs/)
+  pki/                          →   ssh-keygen wrapper that issues user/host certs (two-CA, PC-only)
+  n8n-server/                   →   notes for the n8n side (listen-port reachability, credential paste flow)
 deploy/lib/                     → shared install-script helpers (SSH multiplexing)
 deploy/sync.sh                  → build + rsync + reload helper for the n8n custom-nodes bundle
 experiments/                    → raw-socket smoke tests against a real Q

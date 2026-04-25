@@ -9,10 +9,14 @@ DEVICES_DIR="$OUT_DIR/devices"
 N8N_DIR="$OUT_DIR/n8n"
 LEDGER="$PKI_DIR/certs.tsv"
 
-# Validity periods (days). Match docs/master-plan/12-multi-q.md §12.5.3 defaults.
-CA_DAYS=3650       # 10 years
-SERVER_DAYS=730    # 2 years
-CLIENT_DAYS=730    # 2 years
+# Validity periods (days). All leaf certs default to 10 years to match the CA;
+# revocation in this setup is bookkeeping-only (no CRL — see remove.sh and
+# README.md "What if I need to revoke"), so leaning on long expiry + cheap
+# re-bootstrap is the policy. Override per-cert via `--days <N>` on the CLI
+# or per-invocation via `CA_DAYS=...` / `SERVER_DAYS=...` / `CLIENT_DAYS=...`.
+CA_DAYS="${CA_DAYS:-3650}"
+SERVER_DAYS="${SERVER_DAYS:-3650}"
+CLIENT_DAYS="${CLIENT_DAYS:-3650}"
 
 # --- UI: colors only on a TTY so piped output stays clean -------------------
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -148,19 +152,24 @@ print_help() {
 pki — issue mTLS certificates for the UNO Q relay.
 
 Usage:
-  ./pki setup                                        First time: create your home CA
-  ./pki add device <nickname> [--hostname H] [--ip I]
+  ./pki setup [--days N]                             First time: create your home CA
+  ./pki add device <nickname> [--hostname H] [--ip I] [--days N]
                                                      Issue a server cert for a Q
-  ./pki add n8n <nickname>                           Issue a client cert for an n8n instance
+  ./pki add n8n <nickname> [--days N]                Issue a client cert for an n8n instance
   ./pki list                                         Show all issued certs
   ./pki show <nickname> [-v]                         Show one cert's details (use 'ca' for the home CA)
   ./pki remove <nickname>                            Decommission a cert (delete files, mark in ledger)
   ./pki help                                         This help
 
+Validity defaults: 10 years (3650 days) for the CA and every leaf cert.
+Override per-cert via --days N, or per-invocation via env vars CA_DAYS,
+SERVER_DAYS, CLIENT_DAYS — e.g. CLIENT_DAYS=180 ./pki add n8n laptop.
+
 Examples:
   ./pki setup                                        Run once.
   ./pki add device kitchen                           Defaults: hostname = kitchen.local
   ./pki add device garage --hostname garage.home.lan --ip 192.168.1.42
+  ./pki add device shortlived --days 90              Override default lifetime.
   ./pki add n8n laptop                               For the n8n credential
   ./pki list
   ./pki show kitchen                                 Curated summary

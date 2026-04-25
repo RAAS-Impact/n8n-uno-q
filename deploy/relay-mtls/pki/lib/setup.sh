@@ -7,6 +7,23 @@
 setup_cmd() {
   require_openssl
 
+  local days="$CA_DAYS"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --days) days="$2"; shift 2 ;;
+      --days=*) days="${1#*=}"; shift ;;
+      -*)
+        err "Unknown option: $1"; hint "Valid: --days <N>"; exit 1
+        ;;
+      *)
+        err "Unexpected extra argument: $1"; exit 1
+        ;;
+    esac
+  done
+  if ! printf '%s' "$days" | grep -Eq '^[1-9][0-9]*$'; then
+    err "Invalid --days value: $days (must be a positive integer)"; exit 1
+  fi
+
   if [ -f "$CA_DIR/ca.key" ] || [ -f "$CA_DIR/ca.pem" ]; then
     err "A CA already exists at $CA_DIR/."
     hint "To keep your existing CA: nothing to do, carry on with './pki add device <nick>'."
@@ -16,7 +33,7 @@ setup_cmd() {
 
   mkdir -p "$CA_DIR"
 
-  info "Creating your home CA..."
+  info "Creating your home CA (validity: $days days)..."
 
   # 4096-bit RSA — a CA lives longer than any leaf cert, so err on the generous side.
   # The CA is self-signed; no external trust chain is involved, only devices
@@ -27,14 +44,14 @@ setup_cmd() {
   openssl req -x509 -new -nodes \
     -key "$CA_DIR/ca.key" \
     -sha256 \
-    -days "$CA_DAYS" \
+    -days "$days" \
     -subj "/CN=UNO Q Home CA" \
     -out "$CA_DIR/ca.pem" 2>/dev/null
   chmod 644 "$CA_DIR/ca.pem"
 
   local issued expires
   issued="$(today_iso)"
-  expires="$(days_from_now "$CA_DAYS")"
+  expires="$(days_from_now "$days")"
   ledger_add "ca" "ca" "$issued" "$expires" "ca"
 
   ok "Home CA ready."
