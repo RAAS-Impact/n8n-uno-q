@@ -6,15 +6,20 @@ A minimal socket-to-TCP bridge that exposes `arduino-router`'s Unix socket on a 
 
 See [docs/master-plan/12-multi-q.md §12.5.1](../../docs/master-plan/12-multi-q.md#1251-variant-a--socat-only-step-1-deliverable) for the full design.
 
+> **Migration note (existing checkouts).** Container assets moved from this directory into `q/` — `Dockerfile`, `entrypoint.sh`, `docker-compose.yml` are now under [`q/`](q/). No data loss: `git pull` performs tracked renames and leaves any untracked local files alone. **On the Q nothing changes** — the deployed layout at `$UNOQ_BASE/relay/` is identical, and re-running `./install.sh` redeploys to the same place. Only update muscle memory / custom scripts that referenced `deploy/relay/Dockerfile` etc. — those paths now need a `/q/` segment.
+
 ## What's in this directory
 
 | File | Purpose |
 |---|---|
-| `Dockerfile` | Alpine + socat. Built locally on the Q. |
-| `entrypoint.sh` | One-line socat invocation: TCP listen → Unix socket connect. |
-| `docker-compose.yml` | Publishes the TCP port; bind-mounts `/var/run` so socat can reach the router's socket. |
+| `q/Dockerfile` | Alpine + socat. Built locally on the Q. |
+| `q/entrypoint.sh` | One-line socat invocation: TCP listen → Unix socket connect. |
+| `q/docker-compose.yml` | Publishes the TCP port; bind-mounts `/var/run` so socat can reach the router's socket. |
 | `install.sh` | Deploy to a Q. Accepts `--host <user@host>` to pick a target (overrides `UNOQ_HOST`). |
 | `uninstall.sh` | Remove from a Q. Same `--host` option. |
+| `check.sh` | Verify a deployed relay end-to-end: container running, TCP reachable, `$/version` round-trip. |
+
+**Source layout.** Everything that runs on the Q lives under `q/`; the package root holds only PC-side scripts and docs. `install.sh` rsyncs `q/` to `$UNOQ_BASE/relay/` on the Q, so the remote layout is flat. Convention shared with [../relay-mtls/](../relay-mtls/) and the planned [../relay-ssh/](../relay-ssh/) — see [docs/master-plan/14-relay-ssh.md §14.5](../../docs/master-plan/14-relay-ssh.md).
 
 ## Install
 
@@ -80,11 +85,24 @@ What it does:
 
 ## Verify it's running
 
+The fastest way is `check.sh` — it covers all three layers in one command:
+
+```bash
+./check.sh --host arduino@kitchen.local
+```
+
+What it does:
+1. SSHes to the Q and confirms `docker compose ps` reports the container running.
+2. Opens TCP port 5775 (or `--port`) from the PC to verify the network path.
+3. Performs an actual `$/version` MessagePack-RPC round-trip via the bridge package, so you know the full chain works (relay → router socket → MCU registry).
+
+A successful run prints one JSON line with the router version and elapsed time, then `✓ Plain relay healthy at <host>:<port>`. A failure aborts at the first broken layer and explains what to check.
+
+If you only want the lowest-level signal — "is the container up?" — that's:
+
 ```bash
 ssh arduino@kitchen.local 'docker compose -f /home/arduino/relay/docker-compose.yml ps'
 ```
-
-Expected state: one container named `unoq-relay`, `Up`. If you want to exercise the RPC path end-to-end before wiring n8n, see [packages/bridge/README.md](../../packages/bridge/README.md) and point the test scripts at the TCP endpoint.
 
 ## Troubleshooting
 

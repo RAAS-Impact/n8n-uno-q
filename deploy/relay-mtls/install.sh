@@ -86,17 +86,13 @@ echo "Installing mTLS relay for device '$DEVICE' on $HOST..."
 
 ssh "${SSH_OPTS[@]}" "$HOST" "mkdir -p $REMOTE_DIR/certs"
 
-# Sync relay files. Exclude:
-#   pki/         → PC-only cert issuance tooling; contains ca.key (never ship!)
-#   certs/       → populated separately below with the device-specific bundle
-#   install.sh   → PC-only
-#   uninstall.sh → PC-only
+# Sync the Q-side container assets under q/. The installer scripts, README
+# and PKI tooling live at the package root and aren't shipped — see
+# docs/master-plan/14-relay-ssh.md §14.5 for the q/ convention.
+# Exclude certs/ — populated separately below with the device-specific bundle.
 rsync -av --delete -e "$SSH_CMD" \
-  --exclude pki \
   --exclude certs \
-  --exclude install.sh \
-  --exclude uninstall.sh \
-  "$SCRIPT_DIR/" "$HOST:$REMOTE_DIR/"
+  "$SCRIPT_DIR/q/" "$HOST:$REMOTE_DIR/"
 
 # Push the device cert bundle. No --delete: the dir is already fresh from the
 # mkdir above, and we want this operation to be additive if the user ever

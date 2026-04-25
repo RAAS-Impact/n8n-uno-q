@@ -249,7 +249,7 @@ The `fork` option on socat gives one child process per incoming TCP connection, 
 
 ```yaml
 unoq-relay:
-  image: ghcr.io/raasimpact/unoq-relay:latest        # built from deploy/relay/
+  image: ghcr.io/raasimpact/unoq-relay:latest        # built from deploy/relay/q/
   restart: unless-stopped
   ports:
     # Binding is controlled by UNOQ_RELAY_BIND (default 0.0.0.0 — reachable
@@ -300,7 +300,7 @@ ENTRYPOINT ["/entrypoint.sh"]
 
 ```yaml
 unoq-relay:
-  image: ghcr.io/raasimpact/unoq-relay-tailscale:latest   # built from deploy/relay/ with a -tailscale build target
+  image: ghcr.io/raasimpact/unoq-relay-tailscale:latest   # built from deploy/relay/q/ with a -tailscale build target
   restart: unless-stopped
   network_mode: host                                       # simplest path to WireGuard tun + loopback
   cap_add:
@@ -398,7 +398,7 @@ verifyChain = yes      ; check the presented cert against the CA chain
 
 ```yaml
 unoq-relay:
-  image: ghcr.io/raasimpact/unoq-relay-mtls:latest       # built from deploy/relay-mtls/
+  image: ghcr.io/raasimpact/unoq-relay-mtls:latest       # built from deploy/relay-mtls/q/
   restart: unless-stopped
   ports:
     # mTLS is the gatekeeper, so binding public is the expected default here
@@ -412,7 +412,7 @@ unoq-relay:
 
 **Cert prerequisites (operator supplies, one-time setup):**
 
-Three PEM files in `deploy/relay-mtls/certs/` on the Q:
+Three PEM files in `deploy/relay-mtls/q/certs/` on the PC (placeholder dir tracked by `.gitignore`); they land at `$REMOTE_BASE/relay-mtls/certs/` on the Q after `install.sh` runs:
 
 - `ca.pem` — the owner's CA certificate. Used by stunnel to verify incoming client certs.
 - `server.pem` — server certificate for *this* Q, signed by the CA. SAN must include the hostname or IP the n8n side will connect to.

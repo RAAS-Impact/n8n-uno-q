@@ -26,6 +26,13 @@ export class UnoQRouterApi implements ICredentialType {
     'https://github.com/raas-impact/n8n-uno-q/tree/main/packages/n8n-nodes#credentials';
   properties: INodeProperties[] = [
     {
+      displayName:
+        'This credential assumes a working router endpoint already exists. <b>Unix Socket</b> requires n8n to run on the Q itself (the default deployment shipped by this project). <b>TCP</b> requires a relay container deployed on the Q first — plain (Variant A, trusted LAN) or mTLS (Variant C, untrusted networks, needs a CA + client bundle). Setup instructions, install scripts and PKI tooling: <a href="https://github.com/raas-impact/n8n-uno-q#readme" target="_blank">github.com/raas-impact/n8n-uno-q</a>.',
+      name: 'setupNotice',
+      type: 'notice',
+      default: '',
+    },
+    {
       displayName: 'Transport',
       name: 'transport',
       type: 'options',
@@ -75,7 +82,7 @@ export class UnoQRouterApi implements ICredentialType {
       default: DEFAULT_TCP_PORT,
       displayOptions: { show: { transport: ['tcp'] } },
       description:
-        'TCP port of the relay container. Default 5775 matches deploy/relay/docker-compose.yml.',
+        'TCP port of the relay container. Default 5775 matches deploy/relay/q/docker-compose.yml.',
       required: true,
     },
     {

@@ -58,12 +58,11 @@ echo "Installing plain socat relay on $HOST..."
 # First ssh establishes the ControlMaster — one prompt for password-auth users.
 ssh "${SSH_OPTS[@]}" "$HOST" "mkdir -p $REMOTE_DIR"
 
-# Sync relay files. Exclude the installer scripts themselves — they're for PC
-# use only, and leaving them out of the remote dir prevents drift if the user
-# ever edits them on the Q by accident.
+# Sync only the Q-side container assets under q/. The installer scripts and
+# the README live at the package root and aren't shipped — see
+# docs/master-plan/14-relay-ssh.md §14.5 for the q/ convention.
 rsync -av --delete -e "$SSH_CMD" \
-  --exclude install.sh --exclude uninstall.sh \
-  "$SCRIPT_DIR/" "$HOST:$REMOTE_DIR/"
+  "$SCRIPT_DIR/q/" "$HOST:$REMOTE_DIR/"
 
 ssh "${SSH_OPTS[@]}" "$HOST" "cd $REMOTE_DIR && docker compose up -d"
 

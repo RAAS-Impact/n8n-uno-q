@@ -79,9 +79,9 @@ The installer rsyncs the three files to the Q, runs `docker compose up -d`, and 
 ```bash
 ssh arduino@<q-hostname>
 mkdir -p ~/relay && cd ~/relay
-curl -fsSL -O https://raw.githubusercontent.com/raas-impact/n8n-uno-q/main/deploy/relay/docker-compose.yml
-curl -fsSL -O https://raw.githubusercontent.com/raas-impact/n8n-uno-q/main/deploy/relay/Dockerfile
-curl -fsSL -O https://raw.githubusercontent.com/raas-impact/n8n-uno-q/main/deploy/relay/entrypoint.sh
+curl -fsSL -O https://raw.githubusercontent.com/raas-impact/n8n-uno-q/main/deploy/relay/q/docker-compose.yml
+curl -fsSL -O https://raw.githubusercontent.com/raas-impact/n8n-uno-q/main/deploy/relay/q/Dockerfile
+curl -fsSL -O https://raw.githubusercontent.com/raas-impact/n8n-uno-q/main/deploy/relay/q/entrypoint.sh
 chmod +x entrypoint.sh
 docker compose up -d
 ```
@@ -241,8 +241,10 @@ packages/n8n-nodes              → n8n-nodes-uno-q (UNO Q community nodes)
 packages/n8n-nodes-arduino-cloud → n8n-nodes-arduino-cloud (Arduino Cloud community nodes)
 deploy/n8n/                     → docker-compose (prod base + dev override) for n8n on the Q
 deploy/relay/                   → Variant A: plain socat TCP-to-unix-socket relay
+  q/                            →   container assets shipped to the Q (Dockerfile, compose, entrypoint)
 deploy/relay-mtls/              → Variant C: stunnel + mTLS relay
-deploy/relay-mtls/pki           → openssl wrapper that issues the mTLS certs
+  q/                            →   container assets shipped to the Q (Dockerfile, compose, stunnel.conf, certs/)
+  pki/                          →   openssl wrapper that issues the mTLS certs (PC-only)
 deploy/lib/                     → shared install-script helpers (SSH multiplexing)
 deploy/sync.sh                  → build + rsync + reload helper for the n8n custom-nodes bundle
 experiments/                    → raw-socket smoke tests against a real Q

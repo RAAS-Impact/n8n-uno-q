@@ -17,11 +17,15 @@ npm run build
 # level rsync with --delete against $REMOTE_BASE would wipe the user's
 # entire home of anything not present in ./deploy/. Don't do that.
 #
+# Each relay package's container assets live under <package>/q/ on the PC and
+# rsync to <package>/ on the Q (see docs/master-plan/14-relay-ssh.md §14.5).
+# Installer scripts, READMEs and PKI tooling live at the package root and are
+# never shipped — they're omitted by sourcing q/ instead of the package root.
+#
 # User-supplied state is preserved via --exclude:
 #   - n8n/custom/         → bind-mounted packages, rewritten below
 #   - n8n/local-files/    → user-accessible files inside workflows
 #   - relay-mtls/certs/   → operator-supplied CA + cert + key
-#   - relay-mtls/pki/     → PC-only cert issuance tooling (contains ca.key!)
 # macOS rsync 2.6.9 (Apple default) lacks --mkpath; pre-create dirs via ssh.
 ssh "${SSH_OPTS[@]}" "$HOST" "mkdir -p $REMOTE_BASE/n8n $REMOTE_BASE/relay $REMOTE_BASE/relay-mtls"
 
@@ -30,13 +34,11 @@ rsync -av --delete -e "$SSH_CMD" \
   ./deploy/n8n/ "$HOST:$REMOTE_BASE/n8n/"
 
 rsync -av --delete -e "$SSH_CMD" \
-  --exclude install.sh --exclude uninstall.sh \
-  ./deploy/relay/ "$HOST:$REMOTE_BASE/relay/"
+  ./deploy/relay/q/ "$HOST:$REMOTE_BASE/relay/"
 
 rsync -av --delete -e "$SSH_CMD" \
-  --exclude certs --exclude pki \
-  --exclude install.sh --exclude uninstall.sh \
-  ./deploy/relay-mtls/ "$HOST:$REMOTE_BASE/relay-mtls/"
+  --exclude certs \
+  ./deploy/relay-mtls/q/ "$HOST:$REMOTE_BASE/relay-mtls/"
 
 # --- Sync built packages into n8n's custom/ ------------------------------
 # Wipe first: n8n scans custom/ recursively for *.node.js, so any stale files

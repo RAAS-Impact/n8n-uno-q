@@ -4,6 +4,8 @@ A TLS-terminating proxy in front of `arduino-router`'s Unix socket. Requires a c
 
 See [docs/master-plan/12-multi-q.md §12.5.3](../../docs/master-plan/12-multi-q.md#1253-variant-c--stunnel--mtls) for the full design.
 
+> **Migration note (existing checkouts).** Container assets moved from this directory into [`q/`](q/) — `Dockerfile`, `stunnel.conf`, `docker-compose.yml`, and the `certs/` placeholder. **Your PKI is safe:** the [`pki/`](pki/) tree (CA private key, issued bundles, `certs.tsv`, `revoked_serials`) stayed at the package root and is untouched. **Your deployed cert bundle on the Q is safe:** `install.sh` and `sync.sh` keep `--exclude certs`, so `$UNOQ_BASE/relay-mtls/certs/` is never wiped by rsync `--delete`. **No data loss anywhere** — `git pull` performs tracked renames and leaves untracked local files alone (if you'd ever placed PEMs in the old `certs/` dir manually, they'd survive but be orphaned — not harmful, just unused). Only update muscle memory / custom scripts that referenced `deploy/relay-mtls/Dockerfile` etc. — those paths now need a `/q/` segment.
+
 ## When to use this vs Variant A
 
 | | Use [Variant A](../relay/) | Use Variant C (this) |
@@ -18,13 +20,16 @@ See [docs/master-plan/12-multi-q.md §12.5.3](../../docs/master-plan/12-multi-q.
 
 | File / dir | Purpose |
 |---|---|
-| `Dockerfile` | Alpine + stunnel. |
-| `stunnel.conf` | mTLS config: `verifyPeer=yes`, requires a cert signed by your CA. |
-| `docker-compose.yml` | Publishes the TCP port; bind-mounts `/var/run` for the router socket and `./certs` (read-only) for the PKI material. |
+| `q/Dockerfile` | Alpine + stunnel. |
+| `q/stunnel.conf` | mTLS config: `verifyPeer=yes`, requires a cert signed by your CA. |
+| `q/docker-compose.yml` | Publishes the TCP port; bind-mounts `/var/run` for the router socket and `./certs` (read-only) for the PKI material. |
+| `q/certs/` | PC-side placeholder (only a `.gitignore`); the real cert bundle lands at `$UNOQ_BASE/relay-mtls/certs/` on the Q after install. |
 | `install.sh` | Deploy to a Q. Requires `--device <nick>`; accepts `--host <user@host>` (overrides `UNOQ_HOST`). |
 | `uninstall.sh` | Remove from a Q. Accepts `--host <user@host>`. |
-| `certs/` | Where the deployed cert lives on the Q. Locally only a `.gitignore`. |
+| `check.sh` | Verify a deployed relay end-to-end: container running, TCP reachable, mTLS handshake + `$/version` round-trip. Takes the same `--device <nick>` you passed to `install.sh`; auto-picks an n8n client bundle (use `--n8n <nick>` if you have several). |
 | `pki/` | PC-only cert issuance tooling. **Never shipped to the Q.** See [pki/README.md](pki/README.md). |
+
+**Source layout.** Everything that runs on the Q lives under `q/`; the package root holds only PC-side scripts, docs, and the `pki/` tooling. `install.sh` rsyncs `q/` to `$UNOQ_BASE/relay-mtls/` on the Q (the cert bundle is pushed separately into `relay-mtls/certs/`). Convention shared with [../relay/](../relay/) and the planned [../relay-ssh/](../relay-ssh/) — see [docs/master-plan/14-relay-ssh.md §14.5](../../docs/master-plan/14-relay-ssh.md).
 
 ## End-to-end workflow
 
@@ -109,12 +114,29 @@ If you also want to decommission the cert (e.g. the Q was stolen), run `./pki/pk
 
 ## Verify it's running
 
+The fastest way is `check.sh` — it covers all three layers in one command:
+
+```bash
+./check.sh --device kitchen --host arduino@kitchen.local
+```
+
+What it does:
+1. SSHes to the Q and confirms `docker compose ps` reports the container running.
+2. Opens TCP port 5775 (or `--port`) from the PC to verify the network path.
+3. Performs an actual mTLS handshake + `$/version` MessagePack-RPC round-trip via the bridge package — so a green check proves the entire chain works (TLS chain validation, certificate identity, relay → router socket → MCU registry).
+
+The `--device <nick>` flag matches the one you passed to `install.sh`; the script confirms that the device bundle exists locally and uses an auto-discovered n8n client bundle from `pki/out/n8n/` for the handshake. Pass `--n8n <nick>` if you have multiple n8n bundles issued and want to pick a specific one.
+
+A successful run prints one JSON line with the router version and elapsed time, then `✓ mTLS relay healthy at <host>:<port> (device='<nick>', client='<nick>')`. A failure aborts at the first broken layer and surfaces a concrete cause (e.g. cert SAN mismatch).
+
+Lower-level alternatives if you want to isolate a layer:
+
 **Container is up:**
 ```bash
 ssh arduino@kitchen.local 'docker compose -f /home/arduino/relay-mtls/docker-compose.yml ps'
 ```
 
-**mTLS handshake works (from any host with the client bundle):**
+**mTLS handshake only (no MessagePack-RPC):**
 ```bash
 # With pki/out/n8n/laptop/ on this host.
 openssl s_client \
@@ -125,9 +147,9 @@ openssl s_client \
   -verify_return_error \
   -quiet
 ```
-A successful handshake prints the TLS version and cipher, then hangs waiting for you to type (Ctrl-C to quit). That's proof the relay is doing mTLS correctly end-to-end.
+A successful handshake prints the TLS version and cipher, then hangs waiting for you to type (Ctrl-C to quit).
 
-**Test Connection in n8n:** on the credential edit screen, click *Test Connection*. Green tick = the whole chain (TLS handshake + msgpack-rpc `$/version` call) works.
+**Test Connection in n8n:** on the credential edit screen, click *Test Connection*. Green tick = the whole chain (TLS handshake + `$/version`) works.
 
 ## Renewing certs before they expire
 

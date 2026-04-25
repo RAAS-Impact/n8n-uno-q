@@ -28,6 +28,13 @@ export class ArduinoCloudOAuth2Api implements ICredentialType {
     'https://github.com/raas-impact/n8n-uno-q/tree/main/packages/n8n-nodes-arduino-cloud#credentials';
   properties: INodeProperties[] = [
     {
+      displayName:
+        'Requires an Arduino Cloud account with at least one Thing and an API key. Create the key under <i>Space settings → API keys → Create API key</i> on <a href="https://app.arduino.cc" target="_blank">app.arduino.cc</a>; the Client Secret is shown only once. Full setup walkthrough, supported devices, and Property Guard / Rate Limit usage: <a href="https://github.com/raas-impact/n8n-uno-q/tree/main/packages/n8n-nodes-arduino-cloud#readme" target="_blank">github.com/raas-impact/n8n-uno-q</a>.',
+      name: 'setupNotice',
+      type: 'notice',
+      default: '',
+    },
+    {
       displayName: 'Client ID',
       name: 'clientId',
       type: 'string',
