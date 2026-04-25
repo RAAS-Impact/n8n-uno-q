@@ -161,10 +161,11 @@ This package does not depend on `n8n-nodes-uno-q` and does not replace it. The t
 
 Install both if you have both kinds of hardware. They run side by side with no coupling.
 
-## Links
+## See also
 
-- Master plan, including the wedge analysis behind this package's narrow v1 scope: [`docs/master-plan/13-arduino-cloud.md`](https://github.com/raas-impact/n8n-uno-q/blob/main/docs/master-plan/13-arduino-cloud.md)
-- Companion package for UNO Q workflows: [`n8n-nodes-uno-q`](https://github.com/raas-impact/n8n-uno-q/tree/main/packages/n8n-nodes)
+- [`n8n-nodes-uno-q`](https://www.npmjs.com/package/n8n-nodes-uno-q) — companion package for [Arduino UNO Q](https://store.arduino.cc/products/uno-q) workflows. Sub-10 ms LAN-local RPC to the on-board MCU via `arduino-router`: read sensors, drive GPIO, react to MCU events, and call MCU methods from an AI Agent (with Method Guard + Rate Limit safety rails matching this package's affordances). Disjoint runtime — install both side by side if you have UNO Q hardware *and* other Arduino Cloud-connected boards.
+- [`@raasimpact/arduino-uno-q-bridge`](https://www.npmjs.com/package/@raasimpact/arduino-uno-q-bridge) — the pure-Node.js MessagePack-RPC client behind `n8n-nodes-uno-q`. Useful on its own for Node.js apps on the UNO Q.
+- [Project repo and master plan](https://github.com/raas-impact/n8n-uno-q) — including the wedge analysis behind this package's narrow v1 scope: [`docs/master-plan/13-arduino-cloud.md`](https://github.com/raas-impact/n8n-uno-q/blob/main/docs/master-plan/13-arduino-cloud.md).
 
 ## License
 

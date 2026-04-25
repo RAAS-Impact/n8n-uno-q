@@ -181,6 +181,7 @@ return true;
 
 ## See also
 
+- [`n8n-nodes-arduino-cloud`](https://www.npmjs.com/package/n8n-nodes-arduino-cloud) — companion package for the hosted [Arduino Cloud](https://cloud.arduino.cc) story (Nano 33 IoT, MKR WiFi 1010, Portenta, UNO R4 WiFi, Nano ESP32, …). Read / write Thing Properties, react to MQTT property updates, and expose properties as AI Agent tools with the same Property Guard + Rate Limit safety rails this package ships for the UNO Q. Independent from this package — install both side by side if you have UNO Q hardware *and* other Arduino Cloud-connected boards. The two address different semantics (sub-10 ms LAN-local RPC vs. cloud pub/sub) and don't share state.
 - [`@raasimpact/arduino-uno-q-bridge`](https://www.npmjs.com/package/@raasimpact/arduino-uno-q-bridge) — the underlying pure-Node.js MessagePack-RPC client. Useful on its own for Node.js apps on the UNO Q (Express, Fastify, Bun, raw scripts).
 - [Project repo and design docs](https://github.com/raas-impact/n8n-uno-q)
 
