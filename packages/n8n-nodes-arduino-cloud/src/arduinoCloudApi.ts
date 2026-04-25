@@ -20,6 +20,7 @@ import {
   ThingsV2Api,
 } from '@arduino/arduino-iot-client';
 import { getAccessToken, type TokenRequest } from './auth/tokenCache.js';
+import { acquireRestToken } from './restThrottle.js';
 
 export interface ThingSummary {
   id: string;
@@ -59,7 +60,18 @@ function withOrg(organizationId?: string): CommonOpts {
   return organizationId ? { xOrganization: organizationId } : {};
 }
 
+function throttleKey(credential: TokenRequest): string {
+  // Arduino Cloud's quota is keyed on the OAuth2 client, with the optional
+  // organization scope acting as an effective sub-key for multi-org setups
+  // (different org headers can hit different aggregate budgets in practice).
+  return `${credential.clientId}\0${credential.organizationId ?? ''}`;
+}
+
 async function buildClient(credential: TokenRequest): Promise<ApiClient> {
+  // Block until the per-credential 10/s REST budget has a free slot. Token
+  // mint and cache hits do not pass through here, so the bucket is purely
+  // for the data plane.
+  await acquireRestToken(throttleKey(credential));
   const accessToken = await getAccessToken(credential);
   // ApiClient ctor takes no args; we mutate the returned instance's auth
   // inline because the SDK's `authentications.oauth2` is defined on the
@@ -156,8 +168,11 @@ export async function historicData(
   const batch = await api.seriesV2HistoricData(req, {
     ...withOrg(credential.organizationId),
   });
-  // Response shape: { responses: [{ property_id, times, values, from_date, to_date, ... }] }
-  const responses = batch.responses ?? [];
+  // Response shape: { responses: [{ property_id, times, values, from_date, to_date, ... }] }.
+  // The SDK has been observed to return `null` (not `{responses: []}`) for
+  // properties with no data in the requested window — guard accordingly so
+  // the n8n node returns count:0 in that case instead of throwing.
+  const responses = batch?.responses ?? [];
   return responses.map((r) => {
     const times = r.times ?? [];
     const values = r.values ?? [];
