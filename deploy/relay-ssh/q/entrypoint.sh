@@ -20,6 +20,20 @@
 #   AUTOSSH_POLL       Seconds between autossh's own connection checks. Also
 #                      effectively the retry interval after a refused dial.
 #                      Default 30. Lower = quicker recovery, more log noise.
+#   LOG_LEVEL          OpenSSH client LogLevel. Default ERROR — silences the
+#                      "non-post-quantum KEX" advisory OpenSSH 10+ emits on
+#                      every connect (ssh2 v1.17 on the n8n side has no PQ
+#                      KEX yet). Set INFO or DEBUG for verbose troubleshooting.
+#   ALIVE_INTERVAL     Seconds between application-layer keepalive probes the
+#                      Q sends to n8n. Default 15 → dead-tunnel detection in
+#                      ALIVE_INTERVAL × ALIVE_COUNT_MAX seconds. Lower =
+#                      faster failover, slightly more chatter on the wire.
+#   ALIVE_COUNT_MAX    Number of unanswered keepalives that triggers a
+#                      teardown + autossh respawn. Default 3.
+#   CONNECT_TIMEOUT    Seconds to wait for the initial TCP connect before
+#                      giving up and letting autossh retry. Default 10. Keeps
+#                      a dead-network condition from looking identical to a
+#                      slow handshake.
 #
 # Required cert/key bundle (mounted read-only at /etc/relay-ssh):
 #   id_ed25519             — device private key
@@ -76,9 +90,28 @@ chmod 600 ~/.ssh/known_hosts
 #
 # CertificateFile is the OpenSSH way to pair a key with a cert: -i picks
 # the private key, the cert sits next to it.
+# LogLevel=ERROR silences the "non-post-quantum KEX" advisory OpenSSH 10+
+# prints on every connect (ssh2 v1.17, the n8n-side server, doesn't advertise
+# a PQ KEX yet — see master-plan §14.2 follow-up). Errors and authentication
+# failures still surface; only the WARNING-level PQ notice is dropped.
+# To re-enable verbose troubleshooting output, set LOG_LEVEL=INFO (or DEBUG)
+# in the environment.
+LOG_LEVEL="${LOG_LEVEL:-ERROR}"
+ALIVE_INTERVAL="${ALIVE_INTERVAL:-15}"
+ALIVE_COUNT_MAX="${ALIVE_COUNT_MAX:-3}"
+CONNECT_TIMEOUT="${CONNECT_TIMEOUT:-10}"
+
+# Detection budget for a half-dead session: ALIVE_INTERVAL × ALIVE_COUNT_MAX
+# seconds (default 45s). After that, ssh exits non-zero, autossh respawns it,
+# and the n8n side sees a fresh inbound connection.
+echo "[entrypoint] starting autossh → ${N8N_HOST}:${N8N_SSH_PORT} (poll=${AUTOSSH_POLL}s, alive=${ALIVE_INTERVAL}s×${ALIVE_COUNT_MAX}, connect-timeout=${CONNECT_TIMEOUT}s, dead-tunnel detect=$((ALIVE_INTERVAL * ALIVE_COUNT_MAX))s)"
+
 exec autossh -M 0 -N \
-  -o ServerAliveInterval=30 \
-  -o ServerAliveCountMax=3 \
+  -o "LogLevel=$LOG_LEVEL" \
+  -o "ServerAliveInterval=$ALIVE_INTERVAL" \
+  -o "ServerAliveCountMax=$ALIVE_COUNT_MAX" \
+  -o "ConnectTimeout=$CONNECT_TIMEOUT" \
+  -o TCPKeepAlive=yes \
   -o ExitOnForwardFailure=yes \
   -o StrictHostKeyChecking=yes \
   -o UserKnownHostsFile=/root/.ssh/known_hosts \

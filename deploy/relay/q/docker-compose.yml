@@ -2,6 +2,10 @@ services:
   unoq-relay:
     build: .
     image: ghcr.io/raasimpact/unoq-relay:latest
+    # `unless-stopped` covers Q reboot (Docker daemon comes up with the OS and
+    # restarts every container with this policy) and container/process crash
+    # (socat exits → Docker restarts). The only thing it doesn't do is restart
+    # after a manual `docker stop`, which is what we want during maintenance.
     restart: unless-stopped
     ports:
       # Binding defaults to all interfaces (0.0.0.0) — the "trusted-LAN"
@@ -28,3 +32,22 @@ services:
       # the current socket file. Mounted under /host/var/run to keep the
       # container's own /var/run untouched.
       - /var/run:/host/var/run:rw
+    # Health check: the relay is healthy when socat is bound to the listen
+    # port. busybox netstat is in the Alpine base; a missing LISTEN socket
+    # surfaces in `docker ps` as (unhealthy) and is the typical signal that
+    # something crashed at startup (port already in use after a prior crash,
+    # bad UNOQ_RELAY_BIND, etc.) before n8n's first call ever tries to dial.
+    healthcheck:
+      test: ["CMD-SHELL", "netstat -tln 2>/dev/null | grep -E ':5775[[:space:]]+.*LISTEN' >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    # socat is quiet by default but logs spike during arduino-router restarts
+    # (per-fork ENOENT churn) — bound the disk footprint so the eMMC isn't
+    # surprised. 10 MiB × 3 files ≈ keeps several days of dense logs.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

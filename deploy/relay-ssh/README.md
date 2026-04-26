@@ -131,6 +131,8 @@ Rsync skips unchanged files; `docker compose up -d && restart unoq-relay-ssh` fo
 | `UNOQ_REMOTE_BIND_PORT` | `7000` | Q-side `-R` bind port. Arbitrary — not a routing key. |
 | `UNOQ_AUTOSSH_POLL` | `30` | autossh poll/retry interval in seconds. Equivalent to `--retry-interval`; the CLI flag wins when both are set. Drives both the dead-tunnel detection cadence and how often a refused dial is logged. |
 
+The `.env` file on the Q also accepts `LOG_LEVEL` (default `ERROR`). It silences the post-quantum KEX advisory OpenSSH 10+ prints on every connect — ssh2 v1.17 on the n8n side has no PQ KEX yet (see [master-plan §14.2 follow-up](../../docs/master-plan/14-relay-ssh.md)), so the warning would otherwise fire on every reconnect. Set to `INFO` or `DEBUG` when you need verbose ssh-client output for troubleshooting.
+
 ## Uninstall
 
 ```bash
@@ -154,6 +156,42 @@ ssh arduino@kitchen.local 'docker compose -f /home/arduino/relay-ssh/docker-comp
 Expect autossh to log a single line with the connection coming up. Persistent reconnect loops indicate the n8n side rejected the auth — check the n8n logs for the matching error (wrong CA, expired cert, etc.).
 
 In n8n: open the **Arduino UNO Q SSH Relay** credential and click **Test Connection**. A green tick proves the entire chain works (host-key pinning + user-cert auth + `tcpip-forward` accept + `forwardOut` to the router socket + `$/version` round-trip).
+
+`docker compose ps` also reports a `(healthy)` / `(unhealthy)` flag — see [Reliability and failure modes](#reliability-and-failure-modes) below for what's checked.
+
+## Reliability and failure modes
+
+The relay is designed to recover automatically from every failure mode short of "the certs are wrong" (which is operator error). The recovery chain is layered so each layer covers what the lower one cannot:
+
+| Failure | Detector | Worst-case downtime |
+|---|---|---|
+| Q rebooted | Docker daemon (`restart: unless-stopped` on the compose service) | Boot time of the Q + `AUTOSSH_POLL` (default 30s) |
+| Container crashed | Docker daemon | Container restart + initial dial (~5s) |
+| `autossh` process crashed | Docker daemon (it's PID 1 in the container) | Same as above |
+| `ssh` subprocess exited | `autossh` respawn loop | `AUTOSSH_POLL` (default 30s) |
+| Half-dead TCP session (network blip, n8n-side wedge) | OpenSSH `ServerAliveInterval` × `ServerAliveCountMax` on the Q (15s × 3 = 45s) | 45s detection + `AUTOSSH_POLL` reconnect ≈ 75s |
+| Q disappeared without notice (kernel panic, ungraceful power loss) | TCP keepalive on the n8n-side socket (kernel-wide `tcp_keepalive_*` ceiling, typically ≤ 600s) | Bounded by the kernel sysctl, then `client.on('close')` evicts the registry entry |
+| n8n down for hours/days | autossh keeps polling at `AUTOSSH_POLL` cadence forever | Recovery is instant once n8n comes back |
+| n8n bound the listener but no trigger active yet | The first `UnoQTrigger` activation populates the registry; in-flight `Bridge.connect` waiters resolve as soon as the device shows up | `connectTimeoutMs` on the credential (default 10s) bounds how long a freshly-activated trigger waits before erroring |
+
+Two failure cases that **cannot** appear silently:
+
+- **The Q's autossh thinks the tunnel is up but n8n has no record of it.** Server-side, every `forwardOut` call goes through the existing SSH session — if the session is dead, ssh2 fires a synchronous error that propagates as a Bridge connect error. If the session is alive but the registry entry is missing (e.g. the n8n process restarted mid-connection), `awaitDevice` times out at `connectTimeoutMs` and the workflow sees a clear "device 'X' not connected" error.
+- **Bridge call hangs forever waiting for an MCU response.** Every `bridge.callWithTimeout()` and trigger-deferred response has its own per-call timeout independent of the SSH layer; a stuck channel surfaces as `TimeoutError` in the workflow.
+
+The one case that **can** look silent: if the MCU stops emitting a notify the workflow is waiting for, the trigger sits idle indefinitely — but that's a sketch-side bug, not a relay bug, and it would behave identically over a unix socket. There's no transport-layer way to distinguish "the MCU is quiet" from "the MCU is broken."
+
+### Tuning knobs
+
+All of these are env vars on the `unoq-relay-ssh` service. Defaults are in [`q/docker-compose.yml`](q/docker-compose.yml); override per-Q by editing `$UNOQ_BASE/relay-ssh/.env` and running `docker compose up -d`.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `AUTOSSH_POLL` | `30` | autossh check cadence + retry interval. Lower = snappier recovery, more log noise. |
+| `ALIVE_INTERVAL` | `15` | OpenSSH `ServerAliveInterval`. Together with `ALIVE_COUNT_MAX` defines the half-dead-session detection window. |
+| `ALIVE_COUNT_MAX` | `3` | OpenSSH `ServerAliveCountMax`. Total budget = `ALIVE_INTERVAL × ALIVE_COUNT_MAX` seconds. |
+| `CONNECT_TIMEOUT` | `10` | OpenSSH `ConnectTimeout`. Caps the initial TCP-connect wait so a black-hole route fails fast instead of hanging until the kernel times out. |
+| `LOG_LEVEL` | `ERROR` | OpenSSH client `LogLevel`. Set `INFO`/`DEBUG` for verbose troubleshooting; `ERROR` silences the post-quantum-KEX advisory. |
 
 ## Renewing certs before they expire
 

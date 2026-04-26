@@ -151,6 +151,39 @@ A successful handshake prints the TLS version and cipher, then hangs waiting for
 
 **Test Connection in n8n:** on the credential edit screen, click *Test Connection*. Green tick = the whole chain (TLS handshake + `$/version`) works.
 
+`docker compose ps` also reports a `(healthy)` / `(unhealthy)` flag — see [Reliability and failure modes](#reliability-and-failure-modes) below for what's checked.
+
+## Reliability and failure modes
+
+The relay recovers automatically from every failure mode short of "the certs are wrong" or "the cert expired and you didn't renew" (operator error). Layered defences:
+
+| Failure | Detector | Worst-case downtime |
+|---|---|---|
+| Q rebooted | Docker daemon (`restart: unless-stopped` on the compose service) | Q boot time + container start |
+| Container crashed | Docker daemon | ~5s container restart |
+| stunnel process crashed | Docker daemon (it's PID 1 in the container) | Same as above |
+| Listener didn't bind on startup (port in use, bad config) | Docker healthcheck (port-bound probe) | 30s × 3 retries = 90s to flip `(unhealthy)` |
+| **Server cert expiring within 30 days** | Docker healthcheck (`openssl x509 -checkend`) | Flips `(unhealthy)` 30 days before TLS handshakes start failing |
+| arduino-router restarted (socket inode replaced) | The `/var/run` directory mount re-resolves the path on each stunnel-spawned connection | Per-connection dial transient; subsequent dials succeed |
+| n8n side disappeared mid-call (kernel panic, ungraceful power loss) | OS-level TCP keepalive on the accepted socket (`socket = l:SO_KEEPALIVE=1` in `stunnel.conf`); also the bridge layer's per-call timeout | Bounded by the kernel-wide `tcp_keepalive_*` sysctl ceiling |
+
+Variant C terminates TLS per-call — there's no persistent SSH-style session to keep alive across calls. The half-dead-session class of failures is owned by the bridge's TLS transport at the n8n end (`packages/bridge/src/transport/tls.ts`); the `SO_KEEPALIVE` line on the relay side is belt-and-braces for the case where stunnel's accepted socket would otherwise pin a handler to a phantom client.
+
+### The cert-expiry healthcheck
+
+The healthcheck combines two probes with `&&`:
+
+1. **Port bound**: `netstat -tln | grep ':5775.*LISTEN'`.
+2. **Cert valid for ≥ 30 days**: `openssl x509 -checkend $((30*86400)) -noout -in /etc/stunnel/certs/server.pem`.
+
+When the cert enters its last 30 days, `docker compose ps` reports `(unhealthy)` even though TLS handshakes still succeed. That's intentional — it surfaces renewal hygiene before a hard failure. To clear the warning: re-issue the server bundle and re-run `install.sh`. After the next `docker compose up -d` the next healthcheck cycle reports `(healthy)`.
+
+If the warning is too aggressive for your renewal cadence, change the constant in [`q/docker-compose.yml`](q/docker-compose.yml) (`30*86400` → e.g. `7*86400` for a one-week heads-up).
+
+The `openssl` CLI is pulled in by the Dockerfile specifically for this probe — stunnel itself only links against libcrypto/libssl and doesn't drag in the binary.
+
+Logs are capped at `10 MiB × 3 files` via the `json-file` driver options in [`q/docker-compose.yml`](q/docker-compose.yml). stunnel runs at `debug = 4` (info-level, per-connection handshake info) — meaningful eMMC pressure on a busy board, hence the cap. Bump rotation tighter if you raise `debug` to 5–7 for handshake tracing.
+
 ## Renewing certs before they expire
 
 Default validity for every cert (CA, server, client) is **10 years**. To pin a shorter lifetime, pass `--days N` to `pki add device|n8n`, or set `SERVER_DAYS` / `CLIENT_DAYS` / `CA_DAYS` per invocation. When a cert is about to expire:
@@ -191,6 +224,15 @@ Firewall on the Q, or network path between PC and Q is blocked. Test locally on 
 ```bash
 ssh arduino@kitchen.local 'nc -zv 127.0.0.1 5775'
 ```
+
+**`docker compose ps` reports `(unhealthy)` even though TLS handshakes succeed.**
+The cert-expiry probe baked into the healthcheck (see [Reliability and failure modes](#reliability-and-failure-modes)) flips `(unhealthy)` 30 days before `server.pem` expires. Re-issue the server bundle and re-install:
+```bash
+./pki/pki remove kitchen
+./pki/pki add device kitchen --hostname kitchen.local
+./install.sh --device kitchen
+```
+The next healthcheck cycle (≤ 30s) clears the flag.
 
 **You lost `pki/ca/ca.key`.**
 Every cert becomes unverifiable. Re-bootstrap: `rm -rf pki/ca pki/out pki/certs.tsv && ./pki/pki setup && …` (then re-issue and re-install every device and n8n cert). For small fleets that's faster than operating a CRL; see [pki/README.md](pki/README.md#when-to-graduate-to-step-ca) for when to graduate to step-ca.

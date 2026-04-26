@@ -170,7 +170,10 @@ rsync -av -e "$SSH_CMD" \
 rsync -av -e "$SSH_CMD" \
   "$HOST_PUB" "$HOST:$REMOTE_DIR/certs/n8n_host.pub"
 
-# Write the .env file docker-compose reads.
+# Write the .env file docker-compose reads. Reliability knobs are written
+# only when explicitly set on the install command — leaving them out lets
+# docker-compose pick up the defaults from q/docker-compose.yml, so future
+# changes to defaults take effect on `docker compose up -d` without a re-install.
 ssh "${SSH_OPTS[@]}" "$HOST" "cat > $REMOTE_DIR/.env" <<EOF
 N8N_HOST=$N8N_HOST
 N8N_SSH_PORT=$N8N_SSH_PORT

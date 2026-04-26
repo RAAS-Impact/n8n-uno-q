@@ -1,5 +1,10 @@
 FROM alpine:3
-RUN apk add --no-cache stunnel
+# openssl is for the docker-compose healthcheck's cert-expiry probe (see
+# q/docker-compose.yml). stunnel itself links against libcrypto/libssl but
+# the openssl CLI binary is a separate package — without it `openssl x509
+# -checkend …` exits 127 and the healthcheck flips (unhealthy) for the
+# wrong reason.
+RUN apk add --no-cache stunnel openssl
 COPY stunnel.conf /etc/stunnel/stunnel.conf
 # stunnel runs as root inside the container — simpler read access to the
 # bind-mounted /host/var/run/arduino-router.sock and to /etc/stunnel/certs.

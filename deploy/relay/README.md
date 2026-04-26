@@ -104,6 +104,27 @@ If you only want the lowest-level signal — "is the container up?" — that's:
 ssh arduino@kitchen.local 'docker compose -f /home/arduino/relay/docker-compose.yml ps'
 ```
 
+`docker compose ps` also reports a `(healthy)` / `(unhealthy)` flag — see [Reliability and failure modes](#reliability-and-failure-modes) below for what's checked.
+
+## Reliability and failure modes
+
+The relay recovers automatically from every failure mode short of "the LAN binding is wrong" (operator error). Layered defences:
+
+| Failure | Detector | Worst-case downtime |
+|---|---|---|
+| Q rebooted | Docker daemon (`restart: unless-stopped` on the compose service) | Q boot time + container start |
+| Container crashed | Docker daemon | ~5s container restart |
+| socat process crashed | Docker daemon (it's PID 1 in the container) | Same as above |
+| Listener didn't bind on startup (port in use, bad `UNOQ_RELAY_BIND`) | Docker healthcheck | 30s × 3 retries = 90s to flip `(unhealthy)` |
+| arduino-router restarted (socket inode replaced) | The `/var/run` directory mount re-resolves the path on each socat fork | Per-call dial transient; subsequent dials succeed |
+| n8n side disappeared mid-call (kernel panic, network blip) | The bridge layer's per-call timeout in `BridgeManager` surfaces a clear error to the workflow | Bridge `callWithOptions` timeout (default 10s) |
+
+Variant A is plaintext per-call — there's no persistent session to keep alive, so the half-dead-session class of failures is owned by the bridge transport at the n8n end (`packages/bridge/src/transport/tcp.ts`), not by the relay.
+
+The healthcheck verifies socat is bound to port 5775 inside the container. It does **not** verify end-to-end — for that, run `./check.sh --host …` which exercises a real `$/version` round-trip.
+
+Logs are capped at `10 MiB × 3 files` via the `json-file` driver options in [`q/docker-compose.yml`](q/docker-compose.yml). Plenty of headroom for typical traffic; tighten if you set `socat -d -d` (verbose).
+
 ## Troubleshooting
 
 **`Error response from daemon: driver failed programming external connectivity […] address already in use`.**

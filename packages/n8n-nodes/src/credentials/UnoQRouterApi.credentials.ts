@@ -49,7 +49,14 @@ export class UnoQRouterApi implements ICredentialType {
   properties: INodeProperties[] = [
     {
       displayName:
-        'This credential assumes a working router endpoint already exists. <b>Unix Socket</b> requires n8n to run on the Q itself (the default deployment shipped by this project). <b>TCP</b> requires a relay container deployed on the Q first — plain (Variant A, trusted LAN) or mTLS (Variant C, untrusted networks, needs a CA + client bundle). <b>SSH Relay</b> requires the Q to run an autossh container that dials n8n outbound — Variant B, useful for NAT-ed Qs. Setup instructions, install scripts and PKI tooling: <a href="https://github.com/raas-impact/n8n-uno-q#readme" target="_blank">github.com/raas-impact/n8n-uno-q</a>.',
+        'This credential assumes a working router endpoint already exists. Pick the transport that matches your deployment:' +
+        '<ul>' +
+        '<li><b>Unix Socket (local)</b> — n8n runs on the Q itself. No extra setup.</li>' +
+        '<li><b>TCP, plain (trusted networks only)</b> — n8n is on the LAN; deploy a <code>socat</code> container on the Q first.</li>' +
+        '<li><b>SSH Relay (untrusted networks)</b> — Q is behind NAT or has no public IP reachable by the n8n server; deploy an <code>autossh</code> container on the Q that dials n8n outbound. n8n hosts the embedded SSH server.</li>' +
+        '<li><b>TCP, mTLS (untrusted networks)</b> — n8n reaches the Q through an encrypted tunnel; deploy a <code>stunnel</code> container on the Q, listening for incoming connections.</li>' +
+        '</ul>' +
+        'Setup scripts, PKI tooling for SSH & mTLS, install instructions per variant: <a href="https://github.com/raas-impact/n8n-uno-q#readme" target="_blank">github.com/raas-impact/n8n-uno-q</a>.',
       name: 'setupNotice',
       type: 'notice',
       default: '',
@@ -70,13 +77,13 @@ export class UnoQRouterApi implements ICredentialType {
           name: 'TCP (remote — relay container, Tailscale, LAN)',
           value: 'tcp',
           description:
-            'Connect to a Q across the network via its relay container.',
+            'Connect to a Q across the network via its relay container (either plain TCP or mTLS). A public/reachable LAN or Tailscale IP is required.',
         },
         {
           name: 'SSH Relay (Q dials n8n — NAT-friendly)',
           value: 'ssh-relay',
           description:
-            'The Q runs an autossh container that dials n8n outbound; n8n hosts an embedded SSH server that accepts the reverse tunnel. Use when the Q is behind NAT or has no public IP.',
+            'The Q runs an autossh container that dials n8n outbound; n8n hosts an embedded SSH server that accepts the reverse tunnel. Use when the Q is behind NAT or has no public IP reachable from the n8n server.',
         },
       ],
       description:

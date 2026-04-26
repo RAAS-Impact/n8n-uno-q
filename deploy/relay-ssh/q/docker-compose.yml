@@ -2,6 +2,17 @@ services:
   unoq-relay-ssh:
     build: .
     image: ghcr.io/raasimpact/unoq-relay-ssh:latest
+    # `unless-stopped` is what gives us "starts on Q reboot" + "respawns on
+    # crash" — the Docker daemon comes up with the OS and restarts every
+    # container with this policy. The only thing it doesn't do is restart
+    # after a manual `docker stop`, which is what we want during maintenance.
+    # Combined with autossh's internal respawn loop, the relay tolerates:
+    #   - Q reboot                   (Docker → restart)
+    #   - container crash            (Docker → restart)
+    #   - autossh process crash      (Docker → restart)
+    #   - ssh subprocess exit        (autossh → respawn ssh)
+    #   - half-dead TCP session      (ssh keepalive → exit → autossh respawn)
+    #   - n8n down for hours/days    (autossh keeps polling forever)
     restart: unless-stopped
     # No `ports:` stanza — this is an outbound-only client. The container
     # initiates an SSH connection to N8N_HOST:N8N_SSH_PORT; nothing on the
@@ -19,6 +30,32 @@ services:
       # don't change unless you know what you're doing.
       AUTOSSH_POLL: "${AUTOSSH_POLL:-30}"
       AUTOSSH_GATETIME: "${AUTOSSH_GATETIME:-0}"
+      # OpenSSH client log level. Default ERROR silences the post-quantum KEX
+      # advisory on every connect; set INFO or DEBUG to re-enable verbose
+      # troubleshooting output.
+      LOG_LEVEL: "${LOG_LEVEL:-ERROR}"
+      # Half-dead-session detection budget: the Q sends a keepalive every
+      # ALIVE_INTERVAL seconds and tears down the session after ALIVE_COUNT_MAX
+      # unanswered probes. Defaults give a 45s detection window, which is the
+      # ceiling on "silent deadlock" — even a gone-dark n8n is rediscovered
+      # within that budget.
+      ALIVE_INTERVAL: "${ALIVE_INTERVAL:-15}"
+      ALIVE_COUNT_MAX: "${ALIVE_COUNT_MAX:-3}"
+      # Initial-connect timeout (versus indefinite hang on a black-hole route).
+      CONNECT_TIMEOUT: "${CONNECT_TIMEOUT:-10}"
+    # Health check: the tunnel is healthy when an ESTABLISHED TCP connection
+    # to N8N_HOST:N8N_SSH_PORT exists. busybox netstat is in the Alpine base.
+    # When the check fails, `docker ps` flags the container "unhealthy" so
+    # operators get a clear signal without parsing logs. Combined with the
+    # restart policy and autossh's own respawn loop, the worst-case downtime
+    # bound is dictated by ALIVE_INTERVAL × ALIVE_COUNT_MAX (default 45s) +
+    # AUTOSSH_POLL (default 30s) ≈ 75s after a network blip.
+    healthcheck:
+      test: ["CMD-SHELL", "netstat -tn 2>/dev/null | grep -E ':${N8N_SSH_PORT:-2222}[[:space:]]+.*ESTABLISHED' >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
     volumes:
       # Directory mount — see docs/master-plan/12-multi-q.md §12.5.1 for the
       # rationale (same docker file-bind-mount issue as the other relays,

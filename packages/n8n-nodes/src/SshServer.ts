@@ -196,6 +196,20 @@ export class SshServer {
 
     client.on('ready', () => {
       debug('client-ready', deviceNick ?? '<unauthenticated>');
+      // OS-level TCP keepalive on the underlying socket as defence-in-depth.
+      // The Q's OpenSSH client already polls via ServerAliveInterval (default
+      // 15s × 3 retries = 45s detection), and on failure tears down the TCP
+      // session — which we observe via the 'close' handler below. TCP keepalive
+      // here covers the narrower case where the Q vanishes without OpenSSH
+      // having a chance to send a teardown (kernel panic, ungraceful power
+      // loss). Linux defaults are 7200s + 75s × 9 — way too slow for our
+      // failover budget. We can't change the per-socket idle/intvl/probes from
+      // userspace in Node, but enabling SO_KEEPALIVE at all is still better
+      // than nothing — the kernel-wide tcp_keepalive_* sysctls (commonly tuned
+      // to ~600s) become the ceiling.
+      const sock = (client as unknown as { _sock?: { setKeepAlive?: (b: boolean, ms: number) => void } })
+        ._sock;
+      sock?.setKeepAlive?.(true, 30_000);
     });
 
     client.on('request', (accept, reject, name, requestInfo) => {

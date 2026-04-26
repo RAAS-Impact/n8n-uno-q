@@ -2,6 +2,11 @@ services:
   unoq-relay:
     build: .
     image: ghcr.io/raasimpact/unoq-relay-mtls:latest
+    # `unless-stopped` covers Q reboot (Docker daemon comes up with the OS and
+    # restarts every container with this policy) and container/process crash
+    # (stunnel exits → Docker restarts). The only thing it doesn't do is
+    # restart after a manual `docker stop`, which is what we want during
+    # maintenance.
     restart: unless-stopped
     ports:
       # Same binding semantics as the socat relay (deploy/relay/docker-
@@ -21,3 +26,26 @@ services:
       # before bringing the container up. See docs/master-plan/12-multi-q.md §12.5.3 for the
       # openssl bootstrap commands.
       - ./certs:/etc/stunnel/certs:ro
+    # Health check: combines a listener bind check with a 30-day cert-expiry
+    # warning. The container goes (unhealthy) when:
+    #   1. stunnel isn't listening on 5775 (crashed, bad config), OR
+    #   2. /etc/stunnel/certs/server.pem expires within 30 days.
+    # Case 2 surfaces renewal hygiene on `docker ps` long before TLS
+    # handshakes start failing — operators see the warning, run their pki
+    # renewal flow, and the next `docker compose up -d` clears the flag.
+    # busybox netstat + openssl are in the Alpine base (openssl pulled in by
+    # the stunnel package).
+    healthcheck:
+      test: ["CMD-SHELL", "netstat -tln 2>/dev/null | grep -E ':5775[[:space:]]+.*LISTEN' >/dev/null && openssl x509 -checkend $$((30*86400)) -noout -in /etc/stunnel/certs/server.pem >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    # stunnel runs at debug = 4 (info-level) and logs handshake info per
+    # connection — meaningful eMMC pressure on a busy board. 10 MiB × 3
+    # files ≈ keeps several days of dense logs.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
