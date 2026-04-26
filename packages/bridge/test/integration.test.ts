@@ -1,55 +1,46 @@
 /**
  * Integration tests — run against a real arduino-router on the UNO Q.
  *
- * Tests are split into two groups:
- *   - "router / Node-to-Node" — only need the router running, no specific MCU sketch
- *   - "MCU (integration-test.ino)" — require sketches/integration-test.ino to be flashed
+ * Two transport groups live in this package: unix, tcp, mtls. The fourth
+ * (ssh) lives in packages/n8n-nodes/test/integration.test.ts because the
+ * SSH transport is driven by SshServer, which is an n8n-nodes module.
  *
- * Each group runs once per transport configured via env vars. Multiple env
- * var sets can be populated simultaneously to exercise all three transports
- * in one run.
+ * The recommended entry point is `./scripts/run-integration.sh` from the
+ * repo root: it opens the unix tunnel, deploys + tears down the tcp/mtls
+ * relays on the Q, sets the right env vars, and runs every variant in
+ * sequence. To run a single variant manually, set only its env vars:
  *
- *   A. Unix socket (default, legacy) — SSH-tunnel the router socket to the PC:
+ *   A. Unix socket — SSH-tunnel the router socket to the PC:
  *        rm -f /tmp/arduino-router.sock
  *        ssh -N -L /tmp/arduino-router.sock:/var/run/arduino-router.sock arduino@linucs.local &
  *        UNOQ_SOCKET=/tmp/arduino-router.sock npm run test:integration -w packages/bridge
  *
- *   B. TCP (Variant A relay — docs/master-plan/12-multi-q.md §12.5.1, §12.7 step 1):
- *        On the Q:  cd ~/relay && docker compose up -d
- *        On the PC: ssh -N -L 5775:localhost:5775 arduino@linucs.local &
- *                   UNOQ_TCP_HOST=127.0.0.1 UNOQ_TCP_PORT=5775 \
- *                     npm run test:integration -w packages/bridge
+ *   B. TCP (Variant A relay):
+ *        On the Q:  cd ~/n8n/relay && docker compose up -d
+ *        UNOQ_TCP_HOST=linucs.local UNOQ_TCP_PORT=5775 \
+ *          npm run test:integration -w packages/bridge
  *
- *   C. TLS (Variant C mTLS relay — docs/master-plan/12-multi-q.md §12.5.3):
- *        UNOQ_TLS_HOST must be a name/IP covered by the server cert's SAN —
- *        usually the hostname you passed to `./pki add device <nick>` (default
- *        <nick>.local). Using 127.0.0.1 through an SSH tunnel will fail the
- *        TLS hostname verification unless the cert was issued with that IP
- *        in its SAN. Unlike plain TCP, TLS cares which host string you use.
- *
- *          UNOQ_TLS_HOST=linucs.local UNOQ_TLS_PORT=5775 \
+ *   C. mTLS (Variant C relay) — UNOQ_TLS_HOST must match the server cert SAN
+ *      (typically <device-nick>.local):
+ *        UNOQ_TLS_HOST=linucs.local UNOQ_TLS_PORT=5775 \
  *          UNOQ_TLS_CA=deploy/relay-mtls/pki/out/n8n/laptop/ca.pem \
  *          UNOQ_TLS_CERT=deploy/relay-mtls/pki/out/n8n/laptop/client.pem \
  *          UNOQ_TLS_KEY=deploy/relay-mtls/pki/out/n8n/laptop/client.key \
  *          npm run test:integration -w packages/bridge
+ *
+ * Multiple variants can be configured simultaneously and all run in one
+ * invocation — that's how the orchestrator script drives this.
  */
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
-import { Bridge } from '../src/index.js';
-import type { ConnectOptions } from '../src/index.js';
-
-type TransportCase = { name: string; opts: ConnectOptions };
-
-const transports: TransportCase[] = [];
+import { registerSharedAssertions } from './shared-assertions.js';
 
 // Resolve UNOQ_TLS_* paths against the directory the user actually invoked
 // the command from, not against vitest's CWD. When `npm run test:integration
-// -w packages/bridge` runs, npm cd's into packages/bridge first and the
-// raw `process.cwd()` becomes that package dir — so repo-relative paths
-// like `deploy/relay-mtls/pki/...` would break. INIT_CWD is npm's pre-cd
-// directory, which is what users think of as "where I ran the command."
-// Absolute paths pass through untouched.
+// -w packages/bridge` runs, npm cd's into packages/bridge first; INIT_CWD is
+// npm's pre-cd directory, which is what users think of as "where I ran the
+// command." Absolute paths pass through untouched.
 function resolveUserPath(p: string): string {
   if (path.isAbsolute(p)) return p;
   return path.resolve(process.env.INIT_CWD ?? process.cwd(), p);
@@ -72,25 +63,26 @@ function readCertOrExplain(varName: string, rawPath: string): string {
   }
 }
 
+let registered = 0;
+
 if (process.env.UNOQ_SOCKET) {
-  transports.push({
-    name: 'unix',
-    opts: { socket: process.env.UNOQ_SOCKET, reconnect: { enabled: false } },
-  });
+  registerSharedAssertions('unix', () => ({
+    socket: process.env.UNOQ_SOCKET!,
+    reconnect: { enabled: false },
+  }));
+  registered++;
 }
 
 if (process.env.UNOQ_TCP_HOST && process.env.UNOQ_TCP_PORT) {
-  transports.push({
-    name: 'tcp',
-    opts: {
-      transport: {
-        kind: 'tcp',
-        host: process.env.UNOQ_TCP_HOST,
-        port: Number(process.env.UNOQ_TCP_PORT),
-      },
-      reconnect: { enabled: false },
+  registerSharedAssertions('tcp', () => ({
+    transport: {
+      kind: 'tcp',
+      host: process.env.UNOQ_TCP_HOST!,
+      port: Number(process.env.UNOQ_TCP_PORT),
     },
-  });
+    reconnect: { enabled: false },
+  }));
+  registered++;
 }
 
 if (
@@ -100,226 +92,22 @@ if (
   process.env.UNOQ_TLS_CERT &&
   process.env.UNOQ_TLS_KEY
 ) {
-  // Read cert files synchronously at module-load time so path errors surface
-  // before any test registers — clearest signal for an integration misconfig.
-  transports.push({
-    name: 'tls',
-    opts: {
-      transport: {
-        kind: 'tls',
-        host: process.env.UNOQ_TLS_HOST,
-        port: Number(process.env.UNOQ_TLS_PORT),
-        ca:   readCertOrExplain('UNOQ_TLS_CA',   process.env.UNOQ_TLS_CA),
-        cert: readCertOrExplain('UNOQ_TLS_CERT', process.env.UNOQ_TLS_CERT),
-        key:  readCertOrExplain('UNOQ_TLS_KEY',  process.env.UNOQ_TLS_KEY),
-      },
-      reconnect: { enabled: false },
+  registerSharedAssertions('tls', () => ({
+    transport: {
+      kind: 'tls',
+      host: process.env.UNOQ_TLS_HOST!,
+      port: Number(process.env.UNOQ_TLS_PORT),
+      ca: readCertOrExplain('UNOQ_TLS_CA', process.env.UNOQ_TLS_CA!),
+      cert: readCertOrExplain('UNOQ_TLS_CERT', process.env.UNOQ_TLS_CERT!),
+      key: readCertOrExplain('UNOQ_TLS_KEY', process.env.UNOQ_TLS_KEY!),
     },
-  });
+    reconnect: { enabled: false },
+  }));
+  registered++;
 }
 
-// Emit a skip marker when no transport is configured so the file still
-// registers with Vitest. Without this, the file looks empty.
-if (transports.length === 0) {
+if (registered === 0) {
   describe.skip('integration', () => {
     it('set UNOQ_SOCKET, UNOQ_TCP_HOST+UNOQ_TCP_PORT, or UNOQ_TLS_* to run', () => {});
-  });
-}
-
-for (const t of transports) {
-  const connect = () => Bridge.connect(t.opts);
-
-  describe(`router / Node-to-Node (${t.name})`, () => {
-    let bridge: Bridge | undefined;
-
-    afterEach(async () => {
-      await bridge?.close();
-      bridge = undefined;
-    });
-
-    it('$/version returns a non-empty string', async () => {
-      bridge = await connect();
-      const version = await bridge.call('$/version');
-      expect(typeof version).toBe('string');
-      expect((version as string).length).toBeGreaterThan(0);
-    });
-
-    it('callWithTimeout resolves within limit', async () => {
-      bridge = await connect();
-      const version = await bridge.callWithTimeout('$/version', 2000);
-      expect(typeof version).toBe('string');
-    });
-
-    it('provide: Node → router → Node round-trip', async () => {
-      bridge = await connect();
-      const caller = await connect();
-      try {
-        await bridge.provide('integration_test_echo', (params) => ({ echo: params }));
-        const result = await caller.call('integration_test_echo', 'hello', 42) as Record<string, unknown>;
-        expect(result.echo).toEqual(['hello', 42]);
-      } finally {
-        await caller.close();
-      }
-    });
-
-    it('provide: delayed handler (simulates UnoQRespond) still delivers the response', async () => {
-      // Mirrors what n8n's UnoQTrigger (deferred) + UnoQRespond do:
-      // the provide handler returns a Promise that resolves 5 seconds later.
-      // If this passes, the bridge/router path holds delayed responses open
-      // correctly and the workflow's 5s delay is not the problem.
-      bridge = await connect();
-      const caller = await connect();
-      try {
-        const DELAY_MS = 5000;
-        await bridge.provide('integration_test_delayed', () => {
-          return new Promise((resolve) => setTimeout(() => resolve({ ok: true }), DELAY_MS));
-        });
-
-        const started = Date.now();
-        const result = (await caller.callWithTimeout(
-          'integration_test_delayed',
-          DELAY_MS + 3000,
-        )) as Record<string, unknown>;
-        const elapsed = Date.now() - started;
-
-        expect(result.ok).toBe(true);
-        expect(elapsed).toBeGreaterThanOrEqual(DELAY_MS - 100);
-      } finally {
-        await caller.close();
-      }
-    }, 15_000);
-
-    it('notify: Node → router → Node delivery', async () => {
-      bridge = await connect();
-      const received: unknown[][] = [];
-      await bridge.onNotify('integration_test_notify', (params) => received.push(params));
-
-      const sender = await connect();
-      try {
-        sender.notify('integration_test_notify', 'ping');
-        await new Promise((r) => setTimeout(r, 200));
-        expect(received.length).toBeGreaterThan(0);
-      } finally {
-        await sender.close();
-      }
-    });
-  });
-
-  describe(`MCU (integration-test.ino) (${t.name})`, () => {
-    let bridge: Bridge | undefined;
-
-    afterEach(async () => {
-      await bridge?.close();
-      bridge = undefined;
-    });
-
-    it('ping returns "pong"', async () => {
-      bridge = await connect();
-      expect(await bridge.call('ping')).toBe('pong');
-    });
-
-    it('add(2, 3) returns 5', async () => {
-      bridge = await connect();
-      expect(await bridge.call('add', 2, 3)).toBe(5);
-    });
-
-    it('set_led_state / get_led_state round-trip', async () => {
-      bridge = await connect();
-      await bridge.call('set_led_state', true);
-      expect(await bridge.call('get_led_state')).toBe(true);
-      await new Promise((r) => setTimeout(r, 500));
-      await bridge.call('set_led_state', false);
-      expect(await bridge.call('get_led_state')).toBe(false);
-    });
-
-    it('heartbeat NOTIFY arrives within 7s', async () => {
-      bridge = await connect();
-      let resolveHB!: (p: unknown[]) => void;
-      let rejectHB!: (e: Error) => void;
-      const hbPromise = new Promise<unknown[]>((res, rej) => { resolveHB = res; rejectHB = rej; });
-      const timeout = setTimeout(() => rejectHB(new Error('no heartbeat within 7s')), 7000);
-
-      await bridge.onNotify('heartbeat', (params) => { clearTimeout(timeout); resolveHB(params); });
-
-      const params = await hbPromise;
-      expect(Array.isArray(params)).toBe(true);
-    }, 10_000);
-
-    it('gpio_event via fire_test_event (interrupt → MCU Bridge.call path)', async () => {
-      bridge = await connect();
-      const trigger = await connect();
-      try {
-        let resolveEv!: (p: unknown[]) => void;
-        let rejectEv!: (e: Error) => void;
-        const evPromise = new Promise<unknown[]>((res, rej) => { resolveEv = res; rejectEv = rej; });
-        const timeout = setTimeout(() => rejectEv(new Error('no gpio_event within 2s')), 2000);
-
-        // The sketch sends `Bridge.call("gpio_event", 2)` from the MCU, so we
-        // must act as its handler (provide), not as a notify subscriber.
-        await bridge.provide('gpio_event', (p) => { clearTimeout(timeout); resolveEv(p); return null; });
-        trigger.call('fire_test_event').catch((err: Error) => { clearTimeout(timeout); rejectEv(err); });
-
-        const params = await evPromise;
-        expect(Array.isArray(params)).toBe(true);
-        expect(params[0]).toBe(2);
-      } finally {
-        await trigger.close();
-      }
-    });
-
-    it('gpio_event: router forwards MCU interrupt to bridge without handler → patched error to MCU + caller', async () => {
-      // End-to-end reproduction of the exact scenario the patch at
-      // bridge.ts:294-312 defends against.
-      //
-      //   1. Bridge A registers "gpio_event" on the router ($/register).
-      //      The router now routes any inbound "gpio_event" request to A's
-      //      socket.
-      //   2. We delete "gpio_event" from A's local providers map *without*
-      //      sending $/unregister — this is the drift shape a stale cache /
-      //      reconnect race / mis-ordered teardown would leave us in.
-      //   3. fire_test_event makes the MCU's ISR run Bridge.call("gpio_event", 2)
-      //      over HS1. The router forwards it to A. A hits the patched
-      //      else-branch and replies with
-      //      "no handler registered for method: gpio_event". That error
-      //      travels back to the MCU, which prints it to its serial console.
-      //      When you run this test against a real Q you should see that
-      //      exact line in the Q's logs — not the router-level "method
-      //      gpio_event not available" you'd see if no bridge had registered
-      //      at all.
-      //
-      // Programmatic assertion uses a second Node bridge to call gpio_event
-      // directly — same protocol path, observable rejection — and pins the
-      // exact error string emitted at bridge.ts:308. That prefix appears
-      // nowhere else in the codebase, so a match proves the response came
-      // from A's else-branch on a real router round-trip. handlerInvocations
-      // must stay at 0 — if it isn't, the local deletion didn't take effect
-      // and we'd be accidentally testing the happy path.
-      bridge = await connect();
-      const trigger = await connect();
-      const caller = await connect();
-      let handlerInvocations = 0;
-      try {
-        await bridge.provide('gpio_event', () => {
-          handlerInvocations += 1;
-          return 'should-never-run';
-        });
-        (bridge as unknown as { providers: Map<string, unknown> }).providers.delete('gpio_event');
-
-        // Kick the MCU so the patched error string shows up in the Q's
-        // serial-console logs. The MCU's Bridge.call will return the error
-        // and the sketch prints it; fire_test_event itself only schedules
-        // the interrupt and returns — it does NOT surface the gpio_event
-        // response, which is why we can't assert on trigger.call's result.
-        trigger.call('fire_test_event').catch(() => { /* MCU error path; not asserted here */ });
-
-        await expect(caller.call('gpio_event', 2)).rejects.toThrow(
-          'no handler registered for method: gpio_event',
-        );
-        expect(handlerInvocations).toBe(0);
-      } finally {
-        await trigger.close();
-        await caller.close();
-      }
-    });
   });
 }

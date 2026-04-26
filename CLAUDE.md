@@ -113,26 +113,76 @@ ssh arduino@linucs 'docker compose -f ~/n8n/docker-compose.yml exec n8n ls /home
 
 ## Integration tests (require the real UNO Q)
 
-The bridge's integration suite is gated on the `UNOQ_SOCKET` env var and skipped otherwise. Node never runs on the Q — use an SSH tunnel from the PC:
+The same shared assertion suite runs against all four UNO Q transport variants — **unix**, **tcp**, **mtls**, **ssh** — and lives in two files:
 
-In a **separate terminal**, open the tunnel and leave it running:
+- [packages/bridge/test/integration.test.ts](packages/bridge/test/integration.test.ts) — unix / tcp / mtls (parameterized by env vars)
+- [packages/n8n-nodes/test/integration.test.ts](packages/n8n-nodes/test/integration.test.ts) — ssh (lives here because it depends on `SshServer` from n8n-nodes)
+
+Both files import [packages/bridge/test/shared-assertions.ts](packages/bridge/test/shared-assertions.ts) so the contract every transport must uphold is defined exactly once.
+
+[packages/n8n-nodes-arduino-cloud/test/integration.test.ts](packages/n8n-nodes-arduino-cloud/test/integration.test.ts) is a separate suite — it talks to a real Arduino Cloud account, not to the Q, and uses its own env-var gating (`ARDUINO_CLOUD_CLIENT_ID`/`_SECRET` mandatory; per-feature opt-ins for write and MQTT). It's covered by the same orchestrator command below so one invocation exercises everything you have credentials for.
+
+### One command for the full sweep
 
 ```bash
-rm -f /tmp/arduino-router.sock
-ssh -N -L /tmp/arduino-router.sock:/var/run/arduino-router.sock arduino@linucs.local
+npm run test:integration
 ```
 
-Then, in your working terminal, run the integration suite:
+…runs [scripts/run-integration.sh](scripts/run-integration.sh), which orchestrates the whole flow:
+
+1. Opens the unix-socket SSH tunnel (`/tmp/arduino-router.sock`).
+2. Runs the suite over **unix**.
+3. Deploys the plain-TCP relay via [`deploy/relay/install.sh`](deploy/relay/install.sh), runs **tcp**, tears the relay down.
+4. Deploys the mTLS relay via [`deploy/relay-mtls/install.sh`](deploy/relay-mtls/install.sh), runs **mtls**, tears it down.
+5. Runs **ssh** — boots an in-process `SshServer` and spawns the system `ssh` as the Q-side autossh stand-in (routes through the unix tunnel for the back-channel).
+6. Runs the **arduino-cloud** suite if `ARDUINO_CLOUD_CLIENT_ID` and `ARDUINO_CLOUD_CLIENT_SECRET` are in the environment; otherwise prints a single skip line and moves on. The cloud tests don't touch the Q, but ride the same orchestrator so one invocation covers everything you have credentials for.
+7. Closes the tunnel.
+
+UNO Q variants are serialized — both relay variants default to port 5775 on the Q, and serializing also matches the "one connection at a time" mental model. Each UNO Q variant runs ~12 assertions; the full sweep takes ~90s end-to-end (plus ~30s for the cloud suite when enabled).
+
+### Pre-conditions the operator owns
+
+1. The Q is reachable via SSH at `$UNOQ_HOST` (default `arduino@linucs.local`).
+2. **No relay container is currently running on the Q** — the orchestrator deploys + tears down `relay/` and `relay-mtls/` itself, and cannot detect prior manual deploys without colliding on port 5775.
+3. PKI material is populated (one-time per Q):
+   - `cd deploy/relay-mtls/pki && ./pki setup && ./pki add device <device-nick> && ./pki add n8n <n8n-nick>`
+   - `cd deploy/relay-ssh/pki  && ./pki setup && ./pki add device <device-nick> && ./pki add n8n <n8n-nick>`
+4. [sketches/integration-test.ino](sketches/integration-test.ino) is flashed on the MCU (the MCU-dependent tests fail otherwise; the router-only tests still pass).
+
+### Single-variant runs (manual env, no orchestrator)
+
+When iterating on one transport, set only its env vars and call the workspace script directly. The orchestrator's job is just to set these up; the Vitest suites on their own pick up whatever env vars are set:
 
 ```bash
+# unix
+ssh -N -L /tmp/arduino-router.sock:/var/run/arduino-router.sock arduino@linucs.local &
 UNOQ_SOCKET=/tmp/arduino-router.sock npm run test:integration -w packages/bridge
+
+# tcp (after `cd ~/relay && docker compose up -d` on the Q)
+UNOQ_TCP_HOST=linucs.local UNOQ_TCP_PORT=5775 \
+  npm run test:integration -w packages/bridge
+
+# mtls (after deploy/relay-mtls/install.sh on the Q; UNOQ_TLS_HOST must match the cert SAN)
+UNOQ_TLS_HOST=linucs.local UNOQ_TLS_PORT=5775 \
+  UNOQ_TLS_CA=deploy/relay-mtls/pki/out/n8n/laptop/ca.pem \
+  UNOQ_TLS_CERT=deploy/relay-mtls/pki/out/n8n/laptop/client.pem \
+  UNOQ_TLS_KEY=deploy/relay-mtls/pki/out/n8n/laptop/client.key \
+  npm run test:integration -w packages/bridge
+
+# ssh (uses the unix tunnel as back-channel; no Q-side container needed)
+UNOQ_SOCKET=/tmp/arduino-router.sock \
+  npm run test:integration -w packages/n8n-nodes
 ```
-
-Stop the tunnel with Ctrl-C in the first terminal when done.
-
-The MCU-dependent tests in [integration.test.ts](packages/bridge/test/integration.test.ts) additionally require [sketches/integration-test.ino](sketches/integration-test.ino) to be flashed on the board.
 
 Never reference `/var/run/arduino-router.sock` from PC-side commands — that path only exists on the Q (and inside containers with the socket bind-mounted).
+
+### What stays as a `.mjs` experiment
+
+Diagnostic scripts under [experiments/](experiments/) are intentionally **not** in Vitest — they're for human-driven characterization, not pass/fail assertions:
+
+- [test-router.mjs](experiments/test-router.mjs) — Layer 1 canary (one-off "is the router talking to me?").
+- [test-retry-live.mjs](experiments/test-retry-live.mjs) — needs a human watching cable yanks for the bridge's reconnect/idempotency replay paths.
+- [route-contention-probe.mjs](experiments/route-contention-probe.mjs) — characterizes router behavior on duplicate `$/register`; revisited when a new router release lands.
 
 ## First-time install on the UNO Q
 
