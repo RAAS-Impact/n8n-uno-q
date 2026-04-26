@@ -128,7 +128,7 @@ Both files import [packages/bridge/test/shared-assertions.ts](packages/bridge/te
 npm run test:integration
 ```
 
-…runs [scripts/run-integration.sh](scripts/run-integration.sh), which orchestrates the whole flow:
+…runs [scripts/run-integration.sh](scripts/run-integration.sh), which auto-loads [`.env`](.env.example) (if present) and orchestrates the whole flow:
 
 1. Opens the unix-socket SSH tunnel (`/tmp/arduino-router.sock`).
 2. Runs the suite over **unix**.
@@ -148,6 +148,7 @@ UNO Q variants are serialized — both relay variants default to port 5775 on th
    - `cd deploy/relay-mtls/pki && ./pki setup && ./pki add device <device-nick> && ./pki add n8n <n8n-nick>`
    - `cd deploy/relay-ssh/pki  && ./pki setup && ./pki add device <device-nick> && ./pki add n8n <n8n-nick>`
 4. [sketches/integration-test.ino](sketches/integration-test.ino) is flashed on the MCU (the MCU-dependent tests fail otherwise; the router-only tests still pass).
+5. *(Optional, only for the cloud step)* `ARDUINO_CLOUD_CLIENT_ID` and `ARDUINO_CLOUD_CLIENT_SECRET` are set — easiest via [.env](.env.example), which the orchestrator auto-loads. Per-test opt-ins (`ARDUINO_CLOUD_TEST_THING_ID`, `_WRITE_PROPERTY_ID`, `_TRIGGER_VARIABLE_NAME`, …) are documented in [.env.example](.env.example) and gated individually so partial setups still work.
 
 ### Single-variant runs (manual env, no orchestrator)
 
