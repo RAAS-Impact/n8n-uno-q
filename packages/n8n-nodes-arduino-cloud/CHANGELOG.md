@@ -2,6 +2,18 @@
 
 All notable changes to `n8n-nodes-arduino-cloud` are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the version numbers follow [SemVer](https://semver.org/).
 
+## [0.1.1] — 2026-04-26
+
+Small UX/docs polish; no behavioural changes.
+
+### Added
+
+- **Setup notice on the credential UI** — points users at <https://app.arduino.cc> *Space settings → API keys → Create API key* and reminds them the Client Secret is shown only once. Surfaces in the *Add Credential* form before the Client ID / Secret fields, where the friction actually lives.
+
+### Changed
+
+- README "Links" section restructured as "See also" with explicit npm + GitHub links to the companion `n8n-nodes-uno-q` and `@raasimpact/arduino-uno-q-bridge` packages — clearer signposting for users who landed here via search and may want the UNO Q-hardware story too.
+
 ## [0.1.0] — 2026-04-25
 
 First public release. Two nodes plus a credential, built on the official Arduino JS SDKs.

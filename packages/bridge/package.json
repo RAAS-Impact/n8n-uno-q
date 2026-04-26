@@ -1,6 +1,6 @@
 {
   "name": "@raasimpact/arduino-uno-q-bridge",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Pure Node.js MessagePack-RPC client for the Arduino UNO Q router — read sensors, drive GPIO, and react to async MCU events from any Node.js process.",
   "type": "module",
   "main": "./dist/index.js",

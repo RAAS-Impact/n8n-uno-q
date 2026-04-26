@@ -4,6 +4,20 @@ All notable changes to `@raasimpact/arduino-uno-q-bridge` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-04-26
+
+Reverse-SSH transport + a robustness fix that prevents downstream MCU code from hanging when a bridge closes with work in flight.
+
+### Added
+
+- **`SshTransport`** — fourth transport, sitting on top of an externally-supplied Duplex stream rather than dialing a socket itself. Used by the Variant B reverse-SSH deployment ([master plan §14](https://github.com/raas-impact/n8n-uno-q/blob/main/docs/master-plan/14-relay-ssh.md)) where the n8n-side singleton owns the SSH server; the bridge just receives the forwardOut channel for one specific device. Construct with `new SshTransport({ connect: () => Promise<Duplex> })` and pass it to `Bridge.connect({ transportInstance })`.
+- **`'ssh'` discriminant on `TransportDescriptor`** with `listenAddress`, `listenPort`, `deviceNick` (the cert KeyID — the only routing key on the n8n side per §14.4). The factory throws if a caller tries to construct an SSH transport from descriptor alone — the Duplex must come from the singleton, so `transportInstance` is mandatory for this kind.
+
+### Changed
+
+- **`Bridge.close()` now drains in-flight router-forwarded requests** before tearing down the transport. Each pending `provide` handler invocation gets an explicit `[1, "bridge closing while handling <method>"]` error response written to the wire, so any caller blocked on a synchronous reply (notably an MCU executing `Bridge.call(...)` inside its `loop()`) unblocks instead of hanging forever. The handler's own response writes use the in-flight Map's `delete` as a CAS guard to avoid double-sends.
+- **`Bridge.close()` now sends `$/reset` to the router** (with a 500ms cap so a slow router doesn't block close) to drop every method this connection registered. Without this, the router kept routing for a dead socket; the next caller for one of those methods would either hang or surface a transport-layer error rather than a clean "method not available". Sent unconditionally because callers (tests, drift recovery paths) may have mutated `providers` directly, so local view ≠ router-side truth.
+
 ## [0.3.0] — 2026-04-25
 
 Multi-transport release: `Bridge.connect()` now accepts plain TCP and mTLS in addition to the original Unix socket — wiring the bridge up to remote UNO Qs over a relay container without changing the call/notify/provide surface.
