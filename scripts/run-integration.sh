@@ -63,6 +63,17 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# Auto-load .env if present so `npm run test:integration` works without the
+# user manually exporting cloud creds. See .env.example for the full list.
+# `set -a` exports every assignment until `set +a`; subshells (npm, ssh)
+# inherit the values cleanly.
+if [ -f .env ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . ./.env
+  set +a
+fi
+
 UNOQ_HOST="${UNOQ_HOST:-arduino@linucs.local}"
 UNOQ_TLS_HOST="${UNOQ_TLS_HOST:-linucs.local}"
 UNOQ_TCP_HOST="${UNOQ_TCP_HOST:-linucs.local}"

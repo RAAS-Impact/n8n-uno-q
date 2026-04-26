@@ -47,10 +47,12 @@ class MockRouter {
       for (const msg of messages) {
         this.received.push(msg);
 
-        // Auto-respond to $/register
+        // Auto-respond to $/register and $/reset (the latter is sent by
+        // bridge.close() to drop our routing entries so the router doesn't
+        // forward calls into a dead socket).
         if (msg[0] === MSG_REQUEST) {
           const [, msgid, method] = msg as RpcRequest;
-          if (method === '$/register') {
+          if (method === '$/register' || method === '$/reset') {
             socket.write(encodeResponse(msgid, null, true));
           } else {
             // Notify waiters for non-system requests
@@ -612,6 +614,77 @@ describe('Bridge', () => {
       // Let any leftover Promise settle so afterEach can close cleanly
       resolveHandler('late-response');
       await new Promise((r) => setTimeout(r, 30));
+    });
+
+    it('close() sends an error response for every in-flight provide handler so callers do not hang', async () => {
+      // Contract: when a peer routes a method call to us and we have a
+      // provide handler still mid-execution at close() time, the peer
+      // (e.g. an MCU blocked on a synchronous Bridge.call) must get an
+      // explicit error response rather than silence — silence means the
+      // MCU's loop wedges forever waiting on a reply that never comes,
+      // taking down heartbeats and every subsequent test.
+      let neverResolves: (v: unknown) => void = () => {};
+      await bridge.provide('long_running', () => {
+        return new Promise((resolve) => {
+          neverResolves = resolve;
+        });
+      });
+
+      router.received.length = 0;
+      router.sendRequest(777, 'long_running', []);
+      await new Promise((r) => setTimeout(r, 50));
+      expect(bridge.activeHandlerCount).toBe(1);
+
+      // Close while the handler is still pending. The drain path must
+      // synthesize an error response keyed to msgid 777 *before* the
+      // socket closes.
+      await bridge.close();
+
+      // The error must have arrived on the router-facing socket. This is
+      // the exact byte sequence the MCU would parse to unblock its
+      // Bridge.call: [MSG_RESPONSE, msgid, [code, message], null].
+      const resp = router.received.find(
+        (m) => m[0] === 1 && (m as [number, number, unknown, unknown])[1] === 777,
+      );
+      expect(resp).toBeDefined();
+      const error = (resp as [number, number, unknown, unknown])[3] === null
+        ? (resp as [number, number, [number, string], null])[2]
+        : null;
+      expect(Array.isArray(error)).toBe(true);
+      expect((error as [number, string])[0]).toBe(1);
+      expect((error as [number, string])[1]).toMatch(/long_running/);
+
+      // Settle the dangling handler promise so afterEach can clean up.
+      neverResolves('ignored');
+      await new Promise((r) => setTimeout(r, 10));
+    });
+
+    it('close() sends $/reset so the router stops forwarding to a dead socket', async () => {
+      // Contract: registrations on the router outlive an unhealthy bridge
+      // socket unless we explicitly drop them. Without $/reset on close(),
+      // the next caller for one of our methods may hang on a router that
+      // still routes to us. With it, the router unbinds those routes and
+      // future callers get a clean "method not available" instead.
+      //
+      // The provide() + manual delete pattern reproduces a real drift
+      // shape: a test (or stale-cache code path) clears the local
+      // providers map without going through the public unregister path,
+      // so the router-side routing table is the only authoritative
+      // record of what we own. $/reset must fire regardless of our local
+      // view — gating it on providers.size would skip exactly the case
+      // that matters most.
+      await bridge.provide('echo', (params) => params);
+      (bridge as unknown as { providers: Map<string, unknown> }).providers.delete('echo');
+
+      router.received.length = 0;
+      await bridge.close();
+
+      const reset = router.received.find(
+        (m) =>
+          m[0] === MSG_REQUEST &&
+          (m as RpcRequest)[2] === '$/reset',
+      );
+      expect(reset).toBeDefined();
     });
   });
 });

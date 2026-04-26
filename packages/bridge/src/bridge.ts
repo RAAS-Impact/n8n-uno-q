@@ -130,6 +130,17 @@ export class Bridge extends EventEmitter {
    */
   private activeHandlers = new Set<Promise<void>>();
 
+  /**
+   * In-flight router-forwarded requests, keyed by msgid → method name. Lets
+   * close() write an explicit error response for any request whose handler
+   * has not yet finished — without this drain, the response write races with
+   * transport teardown and the upstream caller (often an MCU blocked on
+   * Bridge.call) hangs forever waiting for a reply that will never arrive.
+   * Entries are removed when the handler writes its own response, so close()
+   * only sends errors for requests still genuinely in flight.
+   */
+  private inFlightRequests = new Map<number, string>();
+
   private connected = false;
   private closedByUs = false;
   private reconnectAttempt = 0;
@@ -198,6 +209,10 @@ export class Bridge extends EventEmitter {
       this.pending.delete(id);
     }
     this.activeHandlers.clear();
+    // Drop in-flight request tracking — the socket is gone, no error
+    // response can be sent. close() handles the graceful path; this branch
+    // covers transport drops where there's no recovery.
+    this.inFlightRequests.clear();
     this.emit('disconnect');
 
     if (this.options.reconnect.enabled && !this.closedByUs) {
@@ -293,11 +308,19 @@ export class Bridge extends EventEmitter {
       debug('recv', 'request', msgid, method);
       const handler = this.providers.get(method as string);
       if (handler) {
+        // Track the request so close() can drain it with an explicit error
+        // response if the handler hasn't finished by then. The handler's
+        // own response writes below skip themselves when delete() returns
+        // false, which means close() already responded on this msgid's
+        // behalf and trying again would double-send.
+        this.inFlightRequests.set(msgid as number, method as string);
         const task = (async () => {
           try {
             const result = await handler(params as unknown[], msgid as number);
-            const ok = this.transport.write(encodeResponse(msgid as number, null, result));
-            if (!ok) debug('send', 'response dropped (socket closed)', msgid, method);
+            if (this.inFlightRequests.delete(msgid as number)) {
+              const ok = this.transport.write(encodeResponse(msgid as number, null, result));
+              if (!ok) debug('send', 'response dropped (socket closed)', msgid, method);
+            }
           } catch (err: unknown) {
             const message = err instanceof Error ? err.message : String(err);
             // arduino-router / RouterBridge dialect expects [code, message].
@@ -305,9 +328,11 @@ export class Bridge extends EventEmitter {
             // parsable (check type)" (err 252). Code 1 = generic application
             // error; code 2 is the router's own "method not available" and
             // we deliberately avoid colliding with it.
-            this.transport.write(
-              encodeResponse(msgid as number, [1, message], null),
-            );
+            if (this.inFlightRequests.delete(msgid as number)) {
+              this.transport.write(
+                encodeResponse(msgid as number, [1, message], null),
+              );
+            }
           }
         })();
         this.activeHandlers.add(task);
@@ -574,13 +599,67 @@ export class Bridge extends EventEmitter {
     }
   }
 
-  /** Gracefully close the socket and clean up all listeners. */
+  /**
+   * Gracefully close the socket and clean up all listeners.
+   *
+   * Two layers of cleanup happen here that downstream consumers (notably
+   * any MCU blocked on a synchronous Bridge.call) depend on:
+   *
+   *   1. Drain in-flight router-forwarded requests by writing an explicit
+   *      `[1, "bridge closing while handling <method>"]` error response
+   *      for each. Without this, a handler that's still mid-execution
+   *      would race with transport teardown and the upstream caller would
+   *      hang forever.
+   *
+   *   2. Send `$/reset` to drop every method this connection registered on
+   *      the router. Without this, the router keeps routing to a dead
+   *      socket; the next caller for one of our methods either hangs (no
+   *      EPIPE-aware fallback) or sees a transport-level error rather than
+   *      a clean "method not available". A bounded timeout means a slow
+   *      router doesn't block close().
+   */
   async close(): Promise<void> {
     this.closedByUs = true;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+
+    if (this.connected) {
+      // Step 1 — drain in-flight handlers with explicit error responses.
+      // Iterate a snapshot so handlers completing concurrently can't mutate
+      // the map mid-loop. Each delete() acts as a CAS: if the handler
+      // already removed its own entry and wrote a response, the snapshot
+      // entry is a no-op here.
+      const inFlight = Array.from(this.inFlightRequests);
+      this.inFlightRequests.clear();
+      for (const [msgid, method] of inFlight) {
+        try {
+          this.transport.write(
+            encodeResponse(msgid, [1, `bridge closing while handling ${method}`], null),
+          );
+        } catch {
+          /* socket already gone — best effort */
+        }
+      }
+
+      // Step 2 — tell the router to forget our registrations. Sent
+      // unconditionally rather than gated on providers.size: callers can
+      // mutate that map directly (tests do, and production drift paths
+      // exist too — see the "no handler registered" branch in
+      // handleMessage), in which case our local view is stale but the
+      // router's routing table is not. $/reset is idempotent, so an
+      // unnecessary call is harmless. Bounded so an unresponsive router
+      // doesn't make close() hang; failures (timeout, network drop) are
+      // non-fatal — the transport.close() below still happens, and the
+      // router's EPIPE detection is the fallback.
+      try {
+        await this.callWithTimeout('$/reset', 500);
+      } catch (err) {
+        debug('close', '$/reset failed (non-fatal):', (err as Error).message);
+      }
+    }
+
     await this.transport.close();
     this.removeAllListeners();
   }
