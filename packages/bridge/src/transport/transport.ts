@@ -33,6 +33,31 @@ export type TransportDescriptor =
       ca: string;
       cert: string;
       key: string;
+    }
+  /**
+   * SSH transport (used by the Variant B reverse-SSH deployment). The
+   * bridge talks to the Q through a Duplex stream forwarded over an SSH
+   * session that the Q itself established outbound to an n8n-side
+   * listener. See docs/master-plan/14-relay-ssh.md.
+   *
+   * Unlike the other transports, 'ssh' cannot construct its socket from
+   * descriptor fields alone — the Duplex comes from a singleton managed
+   * by the n8n-side runtime. So the descriptor carries only routing
+   * identity (deviceNick + the listener it lives in), and the caller
+   * MUST pass `transportInstance` to Bridge.connect (which is what
+   * BridgeManager does for this kind).
+   *
+   * `listenAddress` and `listenPort` together identify the n8n-side SSH
+   * server singleton (one process can only bind one port at a time, but
+   * having the address in the key keeps it explicit). `deviceNick` is
+   * the cert KeyID — the only routing key on the n8n side; the Q-side
+   * `-R` bind port is irrelevant (see §14.4).
+   */
+  | {
+      kind: 'ssh';
+      listenAddress: string;
+      listenPort: number;
+      deviceNick: string;
     };
 
 export interface Transport extends EventEmitter {
@@ -65,5 +90,10 @@ export function describeTransport(d: TransportDescriptor): string {
       // so credential edits that rotate keys but keep the same endpoint don't
       // pointlessly churn the connection pool.
       return `tls:${d.host}:${d.port}`;
+    case 'ssh':
+      // Per-device key. Two credentials pointing at the same n8n-side SSH
+      // listener but different deviceNicks must NOT share a Bridge — they
+      // route to different Qs.
+      return `ssh:${d.listenAddress}:${d.listenPort}/${d.deviceNick}`;
   }
 }

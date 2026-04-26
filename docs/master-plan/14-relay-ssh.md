@@ -1,6 +1,6 @@
 ## 14. Reverse-SSH relay (`deploy/relay-ssh/`)
 
-**Status (2026-04-25):** Commit 1 (`q/` convention, §14.5) and Commit 2 (deploy tooling — single-CA PKI + Q-side autossh container + `install.sh`) shipped. Commit 3 (`SshRelayServer` + `UnoQSshRelayApi` credential in `packages/n8n-nodes`) pending. Architecture diverged from the original "two CAs + host-cert advertising" design after empirical verification — see §14.2 follow-up.
+**Status (2026-04-26):** Commit 1 (`q/` convention, §14.5), Commit 2 (deploy tooling — single-CA PKI + Q-side autossh container + `install.sh`), and Commit 3 (`SshServer` + SSH-relay transport mode in `packages/n8n-nodes`) shipped. Architecture diverged from the original "two CAs + host-cert advertising" design after empirical verification — see §14.2 follow-up. The credential layout also diverged: rather than a separate `UnoQSshApi` sibling type, SSH-relay was merged into the existing `UnoQRouterApi` as a fourth `transport` value — see §14.6 follow-up (2026-04-26).
 
 This section is the master-plan reference for the third relay variant — fills the NAT-traversal gap between Variants A (trusted LAN) and C (mTLS over public IP). Sits alongside §12.5; the §12 nomenclature ("Variant B") is reused informally below for users who already speak in those terms, but the implementation has nothing to do with the deferred Tailscale design in §12.5.2.
 
@@ -14,7 +14,7 @@ The audience this serves: users who run n8n at home or on a small VPS, want to c
 
 ### 14.2 Architecture decision — `ssh2` (Node) replaces a server container
 
-The n8n side runs as a Node module embedded in `n8n-nodes-uno-q`, not a separate container. `SshRelayServer.getInstance()` is a singleton on `globalThis` (same pattern as `BridgeManager`, §7). On the Q only one container runs (autossh client). One install script, no per-port allocation visible to the user, no `host.docker.internal` gotcha.
+The n8n side runs as a Node module embedded in `n8n-nodes-uno-q`, not a separate container. `SshServer.getInstance()` is a singleton on `globalThis` (same pattern as `BridgeManager`, §7). On the Q only one container runs (autossh client). One install script, no per-port allocation visible to the user, no `host.docker.internal` gotcha.
 
 This is a deliberate departure from the symmetry of Variants A/C, where both ends are containers. The asymmetry pays for itself in operational simplicity: the n8n-side install is "paste the bundle into a credential," not "rsync a stack and `docker compose up`."
 
@@ -32,7 +32,7 @@ The original design (commit `a377243`) assumed three load-bearing capabilities i
 
 After the verification, the PKI was simplified to **a single user CA** (no host CA):
 
-- **Server verifies client (n8n verifies the Q):** still **CA-signed**. `./pki/pki setup` creates `user_ca`; `./pki/pki add device <nick>` issues a user cert against it; `SshRelayServer` parses the cert blob and verifies it was signed by `user_ca` via `crypto.verify`. Onboarding new devices is cheap (issue a cert, no n8n-side change).
+- **Server verifies client (n8n verifies the Q):** still **CA-signed**. `./pki/pki setup` creates `user_ca`; `./pki/pki add device <nick>` issues a user cert against it; `SshServer` parses the cert blob and verifies it was signed by `user_ca` via `crypto.verify`. Onboarding new devices is cheap (issue a cert, no n8n-side change).
 - **Client verifies server (Q verifies n8n):** **host-key fingerprint pinning**. `./pki/pki add n8n <nick>` generates a bare ed25519 keypair (no cert). `install.sh --n8n <nick>` ships the host pubkey to the device, which writes it as a regular `known_hosts` line. The device trusts exactly that pubkey and nothing else.
 
 **Trade-off explicitly accepted**: rotating the n8n endpoint's host keypair (`./pki remove <nick>` + `./pki add n8n <nick>`) breaks every Q already pinned to the old pubkey, until `install.sh` is re-run on each one. For a small fleet (one to a few dozen Qs) the cost is acceptable; for larger ones, options are: (a) patch ssh2 to advertise host certs and switch to `@cert-authority`, (b) automate `install.sh` re-runs across the fleet. Either is straightforward when needed.
@@ -71,15 +71,15 @@ After the §14.2 follow-up, the PKI is **one CA** (`user_ca` only, signs device 
 
 Validity default (`CLIENT_DAYS=3650`) lives in `pki/lib/common.sh`. The env-var nomenclature mirrors relay-mtls (`CLIENT_DAYS` = whoever dials, intentionally same name across packages — the role inversion at the package level doesn't affect the env-var meaning). There is no `SERVER_DAYS` in this package: the n8n endpoint presents a bare host key (not a host cert), so there's no validity to bound.
 
-#### Cert-blob parsing for SshRelayServer (Commit 3)
+#### Cert-blob parsing for SshServer (Commit 3)
 
-Since ssh2 doesn't parse user certs, `SshRelayServer.ts` will need its own OpenSSH-PROTOCOL.certkeys reader. The verification harness at [experiments/mock-ssh-relay.mjs](../../experiments/mock-ssh-relay.mjs) implements this in ~80 LOC; port that code into `SshRelayServer.ts` and add `crypto.verify('ed25519', tbsBytes, signatureBytes, userCaPublicKey)` for the actual signature verification (the mock's CA-pubkey-equality shortcut is **not** production-safe by itself).
+Since ssh2 doesn't parse user certs, `SshServer.ts` will need its own OpenSSH-PROTOCOL.certkeys reader. The verification harness at [experiments/mock-ssh-relay.mjs](../../experiments/mock-ssh-relay.mjs) implements this in ~80 LOC; port that code into `SshServer.ts` and add `crypto.verify('ed25519', tbsBytes, signatureBytes, userCaPublicKey)` for the actual signature verification (the mock's CA-pubkey-equality shortcut is **not** production-safe by itself).
 
 The fields needed from the parsed cert: `keyId` (routing key), `principals` (must include `tunnel`), `validAfter`/`validBefore` (current time must fall inside), `extensions['permit-port-forwarding']` (must be present), `signatureKey` (must equal `user_ca.pub` body), and the signature bytes for the crypto.verify check.
 
 ### 14.4 Identification — by `cert.keyId`, not by port
 
-`ssh-keygen -s ca/user_ca -I <nick> ...` writes `<nick>` into `cert.keyId`. The n8n-side `SshRelayServer` stores it on the client object during auth, then:
+`ssh-keygen -s ca/user_ca -I <nick> ...` writes `<nick>` into `cert.keyId`. The n8n-side `SshServer` stores it on the client object during auth, then:
 
 ```js
 client.on('request', (accept, reject, name, info) => {
@@ -163,32 +163,46 @@ Knock-on changes:
 - `install.sh` rsync source: `"$SCRIPT_DIR/"` → `"$SCRIPT_DIR/q/"`. Excludes simplify because `pki/` and the scripts are no longer siblings.
 - `deploy/sync.sh` likewise: source paths become `./deploy/<package>/q/`. The `--exclude pki --exclude install.sh --exclude uninstall.sh` list collapses to just `--exclude certs` for relay-mtls and relay-ssh (operator-supplied — must not be wiped by `--delete` since the local placeholder has only `.gitignore`).
 
-### 14.6 `UnoQSshRelayApi` credential (n8n side)
+### 14.6 SSH-relay credential (n8n side) — merged into `UnoQRouterApi`
 
-Field reference. Multiline PEM/key fields use plain `string` with `typeOptions: { rows: N, password: false }` — **never** `typeOptions: { password: true }`.
+> **Follow-up (2026-04-26): merged into `UnoQRouterApi`.** The original design in this section prescribed a separate sibling credential type `UnoQSshApi`. That was implemented and shipped on 2026-04-25, then walked back the next day after the user flagged the UX cost: every n8n node ended up rendering two parallel "Connection" dropdowns (`UnoQRouterApi` and `UnoQSshApi`), forcing the user to pick one and leave the other empty, with no enforcement of mutual exclusion.
+>
+> **Why the original split was wrong.** It contradicted the precedent set in [§12.5.3](12-multi-q.md) just two days earlier (2026-04-23), where Variant C (mTLS) — a structurally analogous third transport with its own trust model and PEM fields — was *merged* into `UnoQRouterApi` via a "Use TLS (mTLS)" toggle. That decision was recorded with the explicit reasoning that "beginners don't have to understand 'three empty fields mean no TLS', and the UI makes the mode visible at a glance." §14.6 silently departed from that precedent without recording why, and an implementer reading only §14 produced the doubled-credential UX faithfully.
+>
+> **Resolution.** SSH-relay is now a fourth value of `UnoQRouterApi`'s `transport` field: `unix` / `tcp` / `ssh-relay`. `displayOptions` show only the relevant fields per mode. The `UnoQSshApi` credential type was deleted and dropped from `package.json`'s `n8n.credentials` list; the second credential entry was removed from each node's `description.credentials[]`.
+>
+> **Trust-model objection, addressed.** SSH-relay's auth model (Q dials n8n, cert-based) does differ from TCP/TLS (n8n dials Q). That's a code-organization concern, not a user-facing one. From the user's perspective the question is always "how do I reach this Q?" and the answer should be one dropdown.
+>
+> **Rule for future transports.** Add another `transport` value, gate fields with `displayOptions`, do **not** create a sibling credential type. The only condition that would justify a sibling is a model where one node legitimately needs *two* credentials simultaneously — none of our transports do.
 
-**Why** (recorded after the relay-mtls hardware-verification incident, 2026-04-23): n8n's password-masked multiline textarea reformats the stored value in a way that downstream PEM/OpenSSH parsers refuse — whitespace and newlines in the PEM/cert blob no longer round-trip cleanly. Switching to plain (non-password) multiline fields fixed it. Trade-off: the secret is visible in the credential editor, accepted because n8n encrypts credential storage at rest. The same rule already applies in [UnoQRouterApi.credentials.ts](../../packages/n8n-nodes/src/credentials/UnoQRouterApi.credentials.ts) for the mTLS PEM fields — see the explicit `password: false` and the `// NOT password: true` comment block there.
+Field reference (unified credential). Multiline PEM/key fields use plain `string` with `typeOptions: { rows: N, password: false }` — **never** `typeOptions: { password: true }`.
+
+**Why** (recorded after the relay-mtls hardware-verification incident, 2026-04-23): n8n's password-masked multiline textarea reformats the stored value in a way that downstream PEM/OpenSSH parsers refuse — whitespace and newlines in the PEM/cert blob no longer round-trip cleanly. Switching to plain (non-password) multiline fields fixed it. Trade-off: the secret is visible in the credential editor, accepted because n8n encrypts credential storage at rest.
 
 **Single-line secrets** (tokens, passwords) can still use `password: true` safely — the bug is specific to the multiline + password-mask combination on PEM-shaped payloads.
 
+The fields below appear in the credential UI **only when `transport === 'ssh-relay'`** (driven by `displayOptions: { show: { transport: ['ssh-relay'] } }`). The TCP/TLS and Unix-socket fields are gated symmetrically on their own `transport` values; see [packages/n8n-nodes/src/credentials/UnoQRouterApi.credentials.ts](../../packages/n8n-nodes/src/credentials/UnoQRouterApi.credentials.ts) for the full schema.
+
 | # | Field | Type | Notes |
 |---|---|---|---|
-| 1 | Device nickname | string | Routing key. Matches `pki add device <nick>`'s `<nick>`. |
-| 2 | Listen address | string, default `0.0.0.0` | Where the embedded `ssh2.Server` binds. |
-| 3 | Listen port | number, default `2222` | TCP port for incoming Q connections. |
-| 4 | Host private key | string + `rows: 8, password: false` | From `pki/out/n8n/<nick>/ssh_host_ed25519_key`. The bare ed25519 key the SSH server presents during KEX. **No host cert** — by design, see §14.2 follow-up. |
-| 5 | User CA public key | string + `rows: 2, password: false` | From `pki/out/n8n/<nick>/user_ca.pub`. SshRelayServer verifies device certs against this. |
-| 6 | Required principal *(Advanced)* | string, default `tunnel` | Defense-in-depth check. |
-| 7 | Connect timeout (ms) *(Advanced)* | number, default `10000` | Wait time for `connect(deviceNick)` against an absent registry entry. |
-| 8 | Idle disconnect (s) *(Advanced)* | number, default `0` | `0` = never. |
+| 1 | Device Nickname | string | Routing key. Matches `pki add device <nick>`'s `<nick>`. |
+| 2 | Listen Address | string, default `0.0.0.0` | Where the embedded `ssh2.Server` binds. |
+| 3 | Listen Port | number, default `2222` | TCP port for incoming Q connections. |
+| 4 | Host Private Key | string + `rows: 8, password: false` | From `pki/out/n8n/<nick>/ssh_host_ed25519_key`. The bare ed25519 key the SSH server presents during KEX. **No host cert** — by design, see §14.2 follow-up. |
+| 5 | User CA Public Key | string + `rows: 2, password: false` | From `pki/out/n8n/<nick>/user_ca.pub`. SshServer verifies device certs against this. |
+| 6 | Connect Timeout (ms) | number, default `10000` | Wait time for `connect(deviceNick)` against an absent registry entry. |
 
-> **No "Host certificate" field in v1.** ssh2 v1.17 cannot advertise host certs (§14.2 follow-up); devices verify the n8n endpoint via host-key fingerprint pinning instead. The "Host private key" field carries the bare ed25519 key — its pubkey component is what every Q's `known_hosts` is pre-populated with at install time.
+> **No "Required Principal" field.** Originally listed as field #6 in the pre-merge schema (default `tunnel`, "Advanced"). Removed 2026-04-26 because the shipped PKI hard-codes `tunnel` and exposes no override flag, so a configurable n8n-side field could only let users break their own setup. Both ends pin `tunnel` as a constant; if a future PKI fork mints with a different principal, change the `SSH_REQUIRED_PRINCIPAL` constant in [transport-resolver.ts](../../packages/n8n-nodes/src/transport-resolver.ts) and rebuild. The hypothetical use cases (multi-tenant CA sharing, role separation, rotation-as-revocation, third-party PKI integration) are real but theoretical for v1's audience and would require corresponding PKI tooling we don't ship.
 >
-> **No "Revoked serials" field in v1.** Revocation is intentionally out of scope to stay symmetric with [`relay-mtls`](../../deploy/relay-mtls/), where stunnel has no CRL either. `./pki remove` is bookkeeping; the key holder can authenticate until the cert expires (default 10y for device certs, override via `--days`). If active revocation becomes necessary, it gets added in a separate feature for both transports together — see [§14.9](#149-open-items).
+> **No "Idle disconnect (s)" field.** Originally listed as field #8 in the pre-merge schema. Not implemented in [SshServer.ts](../../packages/n8n-nodes/src/SshServer.ts); autossh's keep-alives + the singleton's eviction-on-collision logic were deemed sufficient for v1.
+>
+> **No "Host certificate" field.** ssh2 v1.17 cannot advertise host certs (§14.2 follow-up); devices verify the n8n endpoint via host-key fingerprint pinning instead. The "Host Private Key" field carries the bare ed25519 key — its pubkey component is what every Q's `known_hosts` is pre-populated with at install time.
+>
+> **No "Revoked serials" field.** Revocation is intentionally out of scope to stay symmetric with [`relay-mtls`](../../deploy/relay-mtls/), where stunnel has no CRL either. `./pki remove` is bookkeeping; the key holder can authenticate until the cert expires (default 10y for device certs, override via `--days`). If active revocation becomes necessary, it gets added in a separate feature for both transports together — see [§14.9](#149-open-items).
 
 Test Connection: boot/reuse the singleton, lookup `registry.get(deviceNick)`, and either return "device not currently connected" or do `forwardOut → BridgeManager → call('$/version')` and echo the result.
 
-Multiple credentials per server are expected: one credential per (n8n-host, device) pair. They share the singleton server inside n8n; the credential is just the lookup pointer.
+Multiple credentials per server are expected: one credential per (n8n-host, device) pair. They share the singleton server inside n8n; the credential is just the lookup pointer. Multiple credentials with `transport === 'ssh-relay'` pointing at the same listen address/port share the same `SshServer` singleton — the listen-address fields are read once on first boot and validated identical on subsequent acquires.
 
 ### 14.7 Q-side autossh container (`deploy/relay-ssh/q/`)
 
@@ -243,20 +257,30 @@ exec autossh -M 0 -N \
 - *Doc updates:* top-level [README.md](../../README.md) — variant row "B — reverse SSH"; "Setup the reverse-SSH relay" section; layout tree adds `deploy/relay-ssh/`. [docs/master-plan/12-multi-q.md](12-multi-q.md) §12.7 — new implementation-order entry referencing this section. [CLAUDE.md](../../CLAUDE.md) — troubleshooting table gains rows for cert mismatches and stale connections; "Repo shape" mentions the third deploy unit.
 - *Verification (passed):* `pki setup` → `add n8n laptop` → `add device kitchen` → mock-ssh-relay listening on :12222 → real `ssh -i ... -o CertificateFile=... -R 127.0.0.1:7000:/tmp/dummy.sock tunnel@127.0.0.1` from the same machine. Mock parsed the user cert (keyId, serial, principals, valid-after/before, extensions), accepted auth, accepted `tcpip-forward`, registry size cycled 0→1→0 on disconnect.
 
-**Commit 3 — `SshRelayServer` in `packages/n8n-nodes`. [PENDING]**
+**Commit 3 — `SshServer` in `packages/n8n-nodes`. [SHIPPED 2026-04-25]**
 
-- *New code:* `packages/n8n-nodes/src/SshRelayServer.ts` (singleton on `globalThis` keyed by `Symbol.for('@raasimpact/arduino-uno-q/ssh-relay')`, wraps `ssh2.Server`, auth callback per §14.4, registry per §14.4, eviction on keyId collision). The OpenSSH cert blob parser from `experiments/mock-ssh-relay.mjs` ports verbatim (~80 LOC); add `crypto.verify('ed25519', tbs, sig, userCaPubKey)` for the actual signature check (the mock's CA-pubkey-equality shortcut is **not** production-safe by itself). `packages/n8n-nodes/src/credentials/UnoQSshRelayApi.credentials.ts` per §14.6 (8 fields — no host certificate, no revoked serials; `password: false` on multiline fields). [BridgeManager.ts](../../packages/n8n-nodes/src/BridgeManager.ts) wiring: new `Transport: 'ssh-relay'` resolves to `SshRelayServer.getInstance(creds).connect(creds.deviceNick)`.
-- *Tests:* unit suite covers valid cert / wrong CA (signature verification fails) / expired / missing principal / missing `permit-port-forwarding` extension / keyId collision (second client evicts first). Integration test gated on `UNOQ_SSH_RELAY=1`, spawns `SshRelayServer` + autossh client + runs the round-trip suite.
-- *Doc updates:* [packages/n8n-nodes/README.md](../../packages/n8n-nodes/README.md) — new "SSH Relay transport" section. [docs/master-plan/12-multi-q.md](12-multi-q.md) §12.4 — `UnoQSshRelayApi` added to the credential-types table. [docs/master-plan/12-multi-q.md](12-multi-q.md) §12.7 — entry flips from "deploy tooling only" to "end-to-end shipped." [deploy/relay-ssh/n8n-server/README.md](../../deploy/relay-ssh/n8n-server/README.md) — replaces the "credential type to be implemented" placeholder with concrete field reference.
-- *Verification:* all unit tests green; integration test green against a Q with autossh running; manual end-to-end — credential created with `kitchen-q` as Device nickname, *Test Connection* returns `$/version` from the real Q, then a `UnoQCall` node executes through ssh2.Server → forwardOut → BridgeManager → router socket on the Q.
+Naming note: the runtime class is `SshServer` (not `SshServer`) and the transport descriptor is `kind: 'ssh'`. Same logic as `tcp` and `tls` — the transport name describes the wire protocol on the n8n side, not the deployment artifact. The deployment package keeps its `relay-ssh/` name because that's the role within Variant B; the in-process runtime piece is just the SSH transport.
 
-Strict serial: each commit's verification gates the next. Commit 1 alone is mergeable; the new `relay-ssh` package waits on it.
+- *New code (shipped):*
+  - [packages/bridge/src/transport/ssh.ts](../../packages/bridge/src/transport/ssh.ts) — `SshTransport`, a Duplex-stream-backed Transport that takes a connect-factory at construction time. The factory is invoked on every (re)connect so Bridge's reconnect logic still applies.
+  - [packages/bridge/src/transport/transport.ts](../../packages/bridge/src/transport/transport.ts) — `TransportDescriptor` gains `kind: 'ssh'` with `listenAddress`/`listenPort`/`deviceNick`. `describeTransport` keys per-device.
+  - [packages/n8n-nodes/src/sshCertParser.ts](../../packages/n8n-nodes/src/sshCertParser.ts) — full OpenSSH PROTOCOL.certkeys reader with `verifySshUserCert` calling `crypto.verify('ed25519', tbs, sig, caPubKey)`. CA-pubkey equality is a pre-filter; signature verification is the load-bearing check.
+  - [packages/n8n-nodes/src/SshServer.ts](../../packages/n8n-nodes/src/SshServer.ts) — singleton on `globalThis` keyed by `Symbol.for('@raasimpact/arduino-uno-q/ssh-server')`, wraps `ssh2.Server`, auth callback per §14.4 (cert parse → CA verify → validity window → principal → permit-port-forwarding extension → reject if any critical-options set), registry keyed by KeyID, eviction on collision (zombie reconnect).
+  - [packages/n8n-nodes/src/credentials/UnoQRouterApi.credentials.ts](../../packages/n8n-nodes/src/credentials/UnoQRouterApi.credentials.ts) — extended with a fourth `transport` value `ssh-relay` plus the SSH-specific fields (Device Nickname, Listen Address/Port, Host Private Key, User CA Public Key, Connect Timeout) gated on `displayOptions: { show: { transport: ['ssh-relay'] } }`. Originally shipped 2026-04-25 as a separate `UnoQSshApi` sibling credential type; merged into `UnoQRouterApi` on 2026-04-26 — see §14.6 follow-up for the rationale.
+  - [packages/n8n-nodes/src/transport-resolver.ts](../../packages/n8n-nodes/src/transport-resolver.ts) — single credential type, branches on `cred.transport === 'ssh-relay'`; `validateSshCredential` returns a `ResolvedSshCredential` with defaults applied and the principal pinned via the `SSH_REQUIRED_PRINCIPAL` constant. Resolver result carries `sshCredential` only for SSH descriptors so BridgeManager can boot the singleton.
+  - [packages/n8n-nodes/src/BridgeManager.ts](../../packages/n8n-nodes/src/BridgeManager.ts) — `acquire` / `getBridge` accept an optional `{ sshCredential }`. For `kind: 'ssh'` descriptors BridgeManager calls `SshServer.getInstance().listen(...)` (idempotent) and constructs an `SshTransport` with `connect: () => sshServer.connect(deviceNick)`.
+  - Node files (`UnoQCall`, `UnoQTrigger`, `UnoQTool`) declare a single `unoQRouterApi` credential entry and pass the resolver's `sshCredential` (when present) into BridgeManager.
+- *Dependency move:* `ssh2` switched from workspace-root devDep → `packages/n8n-nodes` regular dep; `@types/ssh2` added as devDep.
+- *Tests (shipped, all green):*
+  - 11 unit tests for `sshCertParser` — real ssh-keygen-issued certs round-trip; tampered signatures rejected; wrong-CA rejected; host-cert algorithm rejected; truncated buffers rejected; non-ed25519 CA rejected.
+  - 7 unit tests for `SshServer` — drive the running server with the system `ssh` binary acting as a Q-stand-in. Cover: valid cert auth + tcpip-forward registration; wrong-CA cert rejected (registry stays empty); cert without `permit-port-forwarding` rejected; cert with mismatched principal rejected; keyId-collision eviction (zombie reconnect path); `connect(deviceNick)` timeout when no Q appears; `listen()` rejects a second config with a different host key.
+- *Doc updates:* this section flipped to SHIPPED; package READMEs updated; CLAUDE.md repo-shape reflects the n8n-side runtime.
+- *Pending:* integration test against a real Q with autossh running (gated on `UNOQ_SSH_RELAY=1`); manual end-to-end *Test Connection* in the n8n UI. These need either real hardware or a more elaborate harness — not blocking the v1 ship.
 
 ### 14.9 Open items
 
 - **Host-key rotation cost.** With pinning instead of `@cert-authority`, rotating an n8n endpoint's host keypair (`./pki remove <nick>` + `./pki add n8n <nick>`) breaks every Q already pinned to the old pubkey, until `install.sh` re-runs on each one. Acceptable for fleets of one to a few dozen Qs. If this becomes painful, options: (a) patch `mscdex/ssh2` to advertise host certs (~30 LOC in `lib/server.js`) and switch back to a host CA + `@cert-authority`, (b) automate fleet-wide `install.sh` re-runs. Either is a follow-up, not v1.
-- **ssh2 user-cert signature verification.** The mock harness skips actual signature verification (compares `signatureKey` bytes only). `SshRelayServer` in Commit 3 must call `crypto.verify('ed25519', tbs, sig, userCaPublicKey)` against the cert's TBS portion + signature. Without that, an attacker holding any keypair could forge a cert claiming `signatureKey == user_ca.pub` and pass auth. Production-blocking — must land before Commit 3 is considered done.
-- **Queue-mode singleton scope.** Same limitation as the rest of the package (§6 singleton-client note, §12.8). The `SshRelayServer` lives per-process, so n8n queue mode would need one ssh2.Server per worker — incompatible with a single listen port. Document as a v1 limitation.
+- **Queue-mode singleton scope.** Same limitation as the rest of the package (§6 singleton-client note, §12.8). The `SshServer` lives per-process, so n8n queue mode would need one ssh2.Server per worker — incompatible with a single listen port. Document as a v1 limitation.
 - **`pki add device <nick>` collision.** The script must refuse if `<nick>` already exists in `certs.tsv` as an active cert (mirrors relay-mtls's behaviour). Otherwise two certs claim the same `keyId` and registry routing becomes last-writer-wins. `pki remove <nick>` flips the row to "removed" and deletes the bundle (bookkeeping only — there is no revocation channel in v1, same as relay-mtls).
 - **Active revocation deferred.** `pki remove` is bookkeeping; the key holder authenticates until cert expiry. Mirrors relay-mtls's stance (§12.5.3 open items). If active revocation becomes necessary, design + ship it for both packages together so they don't drift.
 - **Zombie reconnect.** When a Q's autossh hiccups and reconnects while the old TCP session is in zombie state on the n8n side, two clients may briefly claim the same `keyId`. The server must evict the old `ClientCx` (close it explicitly) before storing the new one. Bake into the registry from day one.
@@ -266,6 +290,6 @@ Strict serial: each commit's verification gates the next. Commit 1 alone is merg
 ### 14.10 Related sections
 
 - §12 — Multi-Q support. Variants A and C are the existing relay shipping shapes; this section adds a third. The `q/` convention introduced here applies retroactively to those two packages.
-- §12.4 — `UnoQRouterApi` credential. `UnoQSshRelayApi` is a sibling credential type; the bridge HAL gains a `Transport: 'ssh-relay'` resolution path.
-- §6.3 — BridgeManager singleton pattern. `SshRelayServer` reuses the `globalThis[Symbol.for(...)]` trick for the same reason.
+- §12.4 — `UnoQRouterApi` credential. SSH-relay is the fourth `transport` value (joining `unix`, `tcp`, and the TLS-toggled flavour of `tcp`); the bridge HAL gains a `kind: 'ssh'` resolution path. Originally designed as a sibling credential type — see §14.6 follow-up (2026-04-26) for why that was reversed.
+- §6.3 — BridgeManager singleton pattern. `SshServer` reuses the `globalThis[Symbol.for(...)]` trick for the same reason.
 - §7 — Dev workflow. Pattern A (bind-mount dev) is unchanged; relay-ssh's Q-side ships through the same `deploy/sync.sh` path.

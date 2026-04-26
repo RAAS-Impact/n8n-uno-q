@@ -156,14 +156,14 @@ export class UnoQTrigger implements INodeType {
         : 'immediate';
     const options = this.getNodeParameter('options', {}) as TriggerOptions;
 
-    const { descriptor } = await resolveTransport(this, options.socketPath);
+    const { descriptor, sshCredential } = await resolveTransport(this, options.socketPath);
     // Canonical transport string — included in the _unoQRequest envelope so
     // a downstream Respond node can distinguish pending requests from
     // different Qs if the user ever routes them through a shared PendingRequests.
     const transport = describeTransport(descriptor);
 
     const manager = BridgeManager.getInstance();
-    const bridge = await manager.acquire(descriptor);
+    const bridge = await manager.acquire(descriptor, { sshCredential });
     const isFirstMethodSubscriber = manager.addMethodRef(descriptor, method);
 
     // Request mode has an "only one trigger can own this method" invariant.

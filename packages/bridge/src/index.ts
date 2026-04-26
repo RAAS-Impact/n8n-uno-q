@@ -22,9 +22,11 @@ export {
   UnixSocketTransport,
   TcpTransport,
   TlsTransport,
+  SshTransport,
 } from './transport/index.js';
 export type {
   UnixSocketTransportOptions,
   TcpTransportOptions,
   TlsTransportOptions,
+  SshTransportOptions,
 } from './transport/index.js';

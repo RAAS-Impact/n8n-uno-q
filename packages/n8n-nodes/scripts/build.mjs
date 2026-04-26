@@ -1,6 +1,13 @@
 import { build } from 'esbuild';
-import { readdirSync } from 'node:fs';
+import { readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+
+// Wipe dist/ before every build. esbuild only writes outputs for current
+// entry points and never deletes stale ones — so a renamed or removed
+// .node.ts / .credentials.ts file would leave its old .js behind, and n8n
+// scans dist/ recursively and would happily load both. Bit us once with
+// UnoQSshApi after the SSH-relay credential merge.
+rmSync('dist', { recursive: true, force: true });
 
 function findEntries(dir, suffix) {
   const results = [];
@@ -24,16 +31,18 @@ function findEntries(dir, suffix) {
 const nodeEntries = findEntries('src/nodes', '.node.ts');
 const credentialEntries = findEntries('src/credentials', '.credentials.ts');
 
-// n8n-workflow is provided by the host n8n runtime. Everything else
-// (bridge, msgpack, BridgeManager, transport-resolver, ...) is bundled into
-// each output file so the published package is self-contained and doesn't
-// need node_modules in custom/.
+// n8n-workflow is provided by the host n8n runtime. ssh2 ships native
+// bindings (.node files) that esbuild can't bundle, so it must be resolved
+// at runtime from node_modules — declared as a regular dependency in
+// package.json so n8n's community-package installer pulls it in. Everything
+// else (bridge, msgpack, BridgeManager, transport-resolver, ...) is bundled
+// into each output file.
 const shared = {
   bundle: true,
   platform: 'node',
   target: 'node20',
   format: 'cjs',
-  external: ['n8n-workflow'],
+  external: ['n8n-workflow', 'ssh2'],
   sourcemap: 'linked',
   logLevel: 'info',
 };

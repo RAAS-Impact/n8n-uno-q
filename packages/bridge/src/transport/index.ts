@@ -6,4 +6,6 @@ export { TcpTransport } from './tcp.js';
 export type { TcpTransportOptions } from './tcp.js';
 export { TlsTransport } from './tls.js';
 export type { TlsTransportOptions } from './tls.js';
+export { SshTransport } from './ssh.js';
+export type { SshTransportOptions } from './ssh.js';
 export { createTransport } from './factory.js';

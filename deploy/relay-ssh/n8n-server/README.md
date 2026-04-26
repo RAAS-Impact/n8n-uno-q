@@ -1,10 +1,10 @@
 # `n8n-server/` — what the n8n host needs
 
-Unlike Variant A and Variant C, the n8n side of the reverse-SSH relay is **not a separate container**. The SSH server runs inside the n8n process itself — `SshRelayServer.getInstance()`, a singleton stashed on `globalThis` (same pattern as `BridgeManager`). There's no `docker compose` to run on the n8n host: the credential carries the host private key + user CA + listen port, and n8n boots the listener on demand the first time a credential is used.
+Unlike Variant A and Variant C, the n8n side of the reverse-SSH relay is **not a separate container**. The SSH server runs inside the n8n process itself — `SshServer.getInstance()`, a singleton stashed on `globalThis` (same pattern as `BridgeManager`). There's no `docker compose` to run on the n8n host: the credential carries the host private key + user CA + listen port, and n8n boots the listener on demand the first time a credential is used.
 
 That means **everything you need to do on the n8n host is paste a credential and make sure a TCP port is reachable.** No container, no systemd unit, no `sshd_config` edits.
 
-> **Status:** as of 2026-04-25 the relay tooling (PKI, Q-side autossh container, `install.sh`) is shipped — Commit 2 of [§14.8](../../../docs/master-plan/14-relay-ssh.md). The `SshRelayServer` and `UnoQSshRelayApi` credential are scheduled for Commit 3 in [packages/n8n-nodes](../../../packages/n8n-nodes/) and not yet implemented; the field reference below is the blueprint, not the running code.
+> **Status:** as of 2026-04-25 the entire stack is shipped — Commit 1, 2, and 3 of [§14.8](../../../docs/master-plan/14-relay-ssh.md). The `SshServer` runtime and the `UnoQSshApi` credential live in [packages/n8n-nodes](../../../packages/n8n-nodes/) (covered by 18 unit tests).
 
 ## Prerequisite: a reachable listen port
 
@@ -54,7 +54,7 @@ The multiline fields (host key, user CA) are deliberately **not** password-maske
 
 ### One credential per device, one host keypair per endpoint
 
-Every Q gets its own credential, keyed by **Device nickname**. The host private key + user CA are the same across all credentials that share the same n8n endpoint (because `install.sh --n8n <nick>` binds Qs to a specific n8n endpoint). All credentials sharing those values use the singleton `SshRelayServer` inside n8n — the per-device split is just a UX-level pointer, not a separate listener per device.
+Every Q gets its own credential, keyed by **Device nickname**. The host private key + user CA are the same across all credentials that share the same n8n endpoint (because `install.sh --n8n <nick>` binds Qs to a specific n8n endpoint). All credentials sharing those values use the singleton `SshServer` inside n8n — the per-device split is just a UX-level pointer, not a separate listener per device.
 
 If you run **multiple n8n endpoints** (e.g. dev + prod) on the same listen port, each endpoint has its own host keypair (`./pki add n8n laptop`, `./pki add n8n prod`); pasting `prod`'s bundle into one credential and `laptop`'s into another would make those credentials boot two separate ssh2.Server singletons — but a single n8n process can only bind one port. In practice: one n8n endpoint per n8n instance.
 
@@ -62,7 +62,7 @@ If you run **multiple n8n endpoints** (e.g. dev + prod) on the same listen port,
 
 After install, the **Test Connection** button on the credential page should:
 
-1. Boot (or reuse) the singleton `SshRelayServer` on the configured listen port.
+1. Boot (or reuse) the singleton `SshServer` on the configured listen port.
 2. Look up the **Device nickname** in the in-process registry.
 3. If found: `forwardOut` through the SSH channel and call `$/version` on the router. Echo the result.
 4. If not found: report "device not currently connected" — the Q's autossh hasn't established the tunnel yet (or the cert was rejected).

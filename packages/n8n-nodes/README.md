@@ -6,8 +6,11 @@ n8n can run on the Q itself (unix socket, same host) or on any other machine tha
 
 - [**`deploy/relay/`**](https://github.com/raas-impact/n8n-uno-q/tree/main/deploy/relay) — plain `socat`, for trusted LANs. No auth, no encryption.
 - [**`deploy/relay-mtls/`**](https://github.com/raas-impact/n8n-uno-q/tree/main/deploy/relay-mtls) — `stunnel` with mutual TLS, for untrusted networks. Requires issuing a client cert via the bundled [`pki`](https://github.com/raas-impact/n8n-uno-q/tree/main/deploy/relay-mtls/pki) wrapper.
+- [**`deploy/relay-ssh/`**](https://github.com/raas-impact/n8n-uno-q/tree/main/deploy/relay-ssh) — `autossh` reverse tunnel, for NAT-ed Qs that can dial out but not be dialled. n8n hosts an embedded SSH server; the Q opens an outbound SSH connection that carries the router socket back through it.
 
-All three setups (unix socket, plain TCP, mTLS) use the same nodes and the same `Arduino UNO Q Router` credential — the transport choice and the optional *Use TLS* toggle pick which one.
+All four setups (unix socket, plain TCP, mTLS, reverse-SSH) use the same nodes and the same `Arduino UNO Q Router` credential — the *Transport* dropdown picks which one.
+
+> **Running n8n in Docker?** The reverse-SSH transport listens on a TCP port (default `2222`) inside the container. You must publish that port from the container to the host — otherwise the Q's `autossh` will hit "Connection refused" even though the listener is up. Add the port (matching your credential's *Listen Port*) to the `ports:` list in your compose file alongside `5678`.
 
 ## Requirements
 

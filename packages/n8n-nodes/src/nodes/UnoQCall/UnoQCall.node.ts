@@ -189,10 +189,10 @@ export class UnoQCall implements INodeType {
         const timeout = options.timeout ?? DEFAULT_TIMEOUT_MS;
         const idempotent = this.getNodeParameter('idempotent', i, false) as boolean;
 
-        const { descriptor } = await resolveTransport(this, options.socketPath, i);
+        const { descriptor, sshCredential } = await resolveTransport(this, options.socketPath, i);
         const params = buildParams(this, mode, i);
 
-        const bridge = await manager.getBridge(descriptor);
+        const bridge = await manager.getBridge(descriptor, { sshCredential });
         const result = await bridge.callWithOptions(method, params, {
           timeoutMs: timeout,
           idempotent,

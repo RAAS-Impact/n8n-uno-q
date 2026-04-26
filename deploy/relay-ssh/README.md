@@ -129,6 +129,7 @@ Rsync skips unchanged files; `docker compose up -d && restart unoq-relay-ssh` fo
 | `UNOQ_HOST` | `arduino@linucs.local` | Target Q. |
 | `UNOQ_BASE` | `/home/arduino` | Base dir on the Q. The relay lands at `$UNOQ_BASE/relay-ssh/`. |
 | `UNOQ_REMOTE_BIND_PORT` | `7000` | Q-side `-R` bind port. Arbitrary — not a routing key. |
+| `UNOQ_AUTOSSH_POLL` | `30` | autossh poll/retry interval in seconds. Equivalent to `--retry-interval`; the CLI flag wins when both are set. Drives both the dead-tunnel detection cadence and how often a refused dial is logged. |
 
 ## Uninstall
 
@@ -190,6 +191,31 @@ The n8n-side registry routes by `keyId`, so two devices with the same KeyID woul
 
 **Test Connection times out from n8n.**
 Either the Q's autossh container isn't running (check `docker compose ps` on the Q), the Q's outbound network blocks the configured listen port (try a different port), or the n8n side hasn't been able to bind the listen port (check the n8n logs). The Q dials *out* — there's nothing inbound to firewall on the Q side.
+
+**autossh logs `Connection refused` to the n8n listen port (forever).**
+Expected when n8n isn't ready to accept the tunnel — the autossh container retries indefinitely, that's by design. The connection succeeds as soon as the n8n side has at least one trigger active for this device (the SSH listener is bound lazily on first activation). Two common pitfalls:
+- **n8n is in Docker and the listen port isn't published.** The listener binds *inside* the container; the host port stays closed unless declared in the compose `ports:` list. Add `"<listenPort>:<listenPort>"` and recreate (`docker compose up -d`).
+- **No trigger active on the n8n side.** The listener is started by the first trigger node activation. Open the workflow and toggle it active (or click "Listen for Test Event") and the autossh next retry should land.
+
+## Logs and rotation
+
+The autossh container retries on a fixed cadence (default 30s, settable via `--retry-interval` at install time or `AUTOSSH_POLL` in `.env`) whenever the n8n side is unreachable. That generates one log line per dial attempt — enough to fill the Q's eMMC over weeks if left unbounded.
+
+Two knobs:
+- **Cadence.** `--retry-interval 120` (or edit `AUTOSSH_POLL` in `$UNOQ_BASE/relay-ssh/.env` and `docker compose up -d`) — slower retries → less noise, slower recovery.
+- **File rotation.** [`q/docker-compose.yml`](q/docker-compose.yml) caps logs at `10m × 3 files` via the `json-file` driver options.
+
+To inspect or trim further:
+
+```bash
+# View live logs:
+ssh arduino@<q-host> 'docker compose -f ~/relay-ssh/docker-compose.yml logs -f --tail=50'
+
+# Force-truncate the current log file (rare — rotation should keep this in check):
+ssh arduino@<q-host> 'docker compose -f ~/relay-ssh/docker-compose.yml down && docker compose -f ~/relay-ssh/docker-compose.yml up -d'
+```
+
+If you raise verbosity (e.g. add `-v` to autossh in `entrypoint.sh` while debugging), tighten the cap to compensate.
 
 ## SSH multiplexing
 

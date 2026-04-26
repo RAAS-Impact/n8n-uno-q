@@ -1,12 +1,18 @@
 /**
  * transport-resolver — pick the router descriptor a node should talk to.
  *
- * Priority:
- *   1. If the node has a `unoQRouterApi` credential assigned, build the
- *      descriptor from the credential's fields and return its ID alongside.
- *   2. Otherwise fall back to the legacy per-node "Socket Path" option —
- *      emit a one-time deprecation warning. This path will be removed in
- *      the next major release.
+ * One credential type, one assignment per node. The credential's
+ * `transport` field decides which descriptor shape to build:
+ *
+ *   - `unix`      — same-host unix socket (default).
+ *   - `tcp`       — n8n dials the Q over TCP, optionally with mTLS (Variant C).
+ *   - `ssh-relay` — Q dials n8n over reverse-SSH (Variant B); the resolver
+ *                   surfaces the SSH-specific fields (host private key, user
+ *                   CA pubkey, listen address/port, timeout) on `sshCredential`
+ *                   so BridgeManager can boot the singleton SshServer.
+ *
+ * If no credential is assigned, fall back to the legacy per-node "Socket
+ * Path" option and emit a one-time deprecation warning.
  *
  * Each node file is bundled independently by esbuild, so this helper lives
  * under `src/` and is inlined into every bundle. No shared runtime state.
@@ -15,9 +21,13 @@ import { NodeOperationError } from 'n8n-workflow';
 import type { IDataObject, INode, Logger } from 'n8n-workflow';
 import type { TransportDescriptor } from '@raasimpact/arduino-uno-q-bridge';
 
+export type UnoQTransportMode = 'unix' | 'tcp' | 'ssh-relay';
+
 export interface UnoQRouterCredential {
-  transport: 'unix' | 'tcp';
+  transport: UnoQTransportMode;
+  // Unix
   socketPath?: string;
+  // TCP / TLS
   host?: string;
   port?: number;
   /** mTLS mode (Variant C). When true, caCert/clientCert/clientKey must all be populated. */
@@ -25,6 +35,38 @@ export interface UnoQRouterCredential {
   caCert?: string;
   clientCert?: string;
   clientKey?: string;
+  // SSH Relay (Variant B)
+  deviceNick?: string;
+  listenAddress?: string;
+  listenPort?: number;
+  hostPrivateKey?: string;
+  userCaPublicKey?: string;
+  connectTimeoutMs?: number;
+}
+
+/**
+ * The principal n8n requires on every accepted device user cert. The
+ * shipped PKI hard-codes this value and exposes no override flag, so
+ * making it credential-configurable would only let users break their
+ * own setup. If a future fork mints with a different principal, change
+ * this constant and rebuild.
+ */
+export const SSH_REQUIRED_PRINCIPAL = 'tunnel';
+
+/**
+ * Resolved SSH credential — the SSH-specific subset of the credential
+ * payload with defaults applied (every field non-undefined) and the
+ * pinned principal injected. Consumers (BridgeManager → SshServer) treat
+ * this as the source of truth.
+ */
+export interface ResolvedSshCredential {
+  deviceNick: string;
+  listenAddress: string;
+  listenPort: number;
+  hostPrivateKey: string;
+  userCaPublicKey: string;
+  connectTimeoutMs: number;
+  requiredPrincipal: string;
 }
 
 interface ResolverContext {
@@ -37,10 +79,22 @@ export interface ResolvedTransport {
   descriptor: TransportDescriptor;
   /** Credential ID, or undefined if resolved from the legacy socketPath option. */
   credentialId?: string;
+  /**
+   * Present only when descriptor.kind === 'ssh' — the SSH-specific subset
+   * of the credential payload with defaults applied and the pinned
+   * principal injected. The SSH transport needs the host private key +
+   * user CA pubkey to boot the SshServer singleton; passing them through
+   * the resolver keeps the credential-fetch responsibility on this layer
+   * rather than pushing it into BridgeManager.
+   */
+  sshCredential?: ResolvedSshCredential;
 }
 
 export const CREDENTIAL_NAME = 'unoQRouterApi';
 const LEGACY_DEFAULT_SOCKET = '/var/run/arduino-router.sock';
+const SSH_DEFAULT_LISTEN_ADDRESS = '0.0.0.0';
+const SSH_DEFAULT_LISTEN_PORT = 2222;
+const SSH_DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 
 export async function resolveTransport(
   ctx: ResolverContext,
@@ -49,12 +103,26 @@ export async function resolveTransport(
 ): Promise<ResolvedTransport> {
   const node = ctx.getNode();
   const credRef = node.credentials?.[CREDENTIAL_NAME];
-
   if (credRef?.id) {
     const cred = (await ctx.getCredentials<UnoQRouterCredential>(
       CREDENTIAL_NAME,
       itemIndex,
     )) as UnoQRouterCredential;
+
+    if (cred.transport === 'ssh-relay') {
+      const validated = validateSshCredential(node, cred);
+      return {
+        descriptor: {
+          kind: 'ssh',
+          listenAddress: validated.listenAddress,
+          listenPort: validated.listenPort,
+          deviceNick: validated.deviceNick,
+        },
+        credentialId: credRef.id,
+        sshCredential: validated,
+      };
+    }
+
     return {
       descriptor: descriptorFromCredential(node, cred),
       credentialId: credRef.id,
@@ -73,6 +141,51 @@ export async function resolveTransport(
   }
   return {
     descriptor: { kind: 'unix', path: legacySocketPath || LEGACY_DEFAULT_SOCKET },
+  };
+}
+
+/**
+ * Validate the SSH-relay subset of the credential and fill in defaults.
+ * Throws if a required field is empty.
+ */
+function validateSshCredential(node: INode, cred: UnoQRouterCredential): ResolvedSshCredential {
+  const deviceNick = (cred.deviceNick ?? '').trim();
+  if (!deviceNick) {
+    throw new NodeOperationError(node, 'Credential has transport=ssh-relay but "Device Nickname" is empty.');
+  }
+  const hostPrivateKey = (cred.hostPrivateKey ?? '').trim();
+  if (!hostPrivateKey) {
+    throw new NodeOperationError(
+      node,
+      'Credential has transport=ssh-relay but "Host Private Key" is empty. Paste the contents of pki/out/n8n/<nick>/ssh_host_ed25519_key.',
+    );
+  }
+  const userCaPublicKey = (cred.userCaPublicKey ?? '').trim();
+  if (!userCaPublicKey) {
+    throw new NodeOperationError(
+      node,
+      'Credential has transport=ssh-relay but "User CA Public Key" is empty. Paste the contents of pki/out/n8n/<nick>/user_ca.pub.',
+    );
+  }
+  const listenAddress = (cred.listenAddress ?? '').trim() || SSH_DEFAULT_LISTEN_ADDRESS;
+  const listenPort = Number(cred.listenPort);
+  const finalListenPort =
+    Number.isFinite(listenPort) && listenPort > 0 && listenPort <= 65_535
+      ? listenPort
+      : SSH_DEFAULT_LISTEN_PORT;
+  const connectTimeoutMs = Number(cred.connectTimeoutMs);
+  const finalTimeoutMs =
+    Number.isFinite(connectTimeoutMs) && connectTimeoutMs > 0
+      ? connectTimeoutMs
+      : SSH_DEFAULT_CONNECT_TIMEOUT_MS;
+  return {
+    deviceNick,
+    listenAddress,
+    listenPort: finalListenPort,
+    hostPrivateKey,
+    userCaPublicKey,
+    requiredPrincipal: SSH_REQUIRED_PRINCIPAL,
+    connectTimeoutMs: finalTimeoutMs,
   };
 }
 

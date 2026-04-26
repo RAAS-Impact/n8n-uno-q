@@ -12,6 +12,14 @@
 #   REMOTE_BIND_PORT   The Q-side port the n8n side opens via -R. Arbitrary;
 #                      not used as a routing key (the cert's KeyID is). 7000
 #                      by default.
+#   AUTOSSH_GATETIME   Seconds the SSH session must stay up before autossh
+#                      considers it "established". 0 disables the gate (any
+#                      reconnect counts) and is what we want here — n8n may
+#                      be down for long stretches and we don't want autossh
+#                      to give up. Default 0.
+#   AUTOSSH_POLL       Seconds between autossh's own connection checks. Also
+#                      effectively the retry interval after a refused dial.
+#                      Default 30. Lower = quicker recovery, more log noise.
 #
 # Required cert/key bundle (mounted read-only at /etc/relay-ssh):
 #   id_ed25519             — device private key
@@ -29,6 +37,9 @@ set -eu
 : "${N8N_HOST:?N8N_HOST is required (the public hostname of the n8n SSH endpoint)}"
 N8N_SSH_PORT="${N8N_SSH_PORT:-2222}"
 REMOTE_BIND_PORT="${REMOTE_BIND_PORT:-7000}"
+# autossh tunables — exported so the autossh binary picks them up.
+export AUTOSSH_GATETIME="${AUTOSSH_GATETIME:-0}"
+export AUTOSSH_POLL="${AUTOSSH_POLL:-30}"
 
 CERT_DIR="/etc/relay-ssh"
 for f in id_ed25519 id_ed25519-cert.pub n8n_host.pub; do

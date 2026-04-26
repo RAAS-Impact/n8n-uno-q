@@ -13,6 +13,12 @@ services:
       N8N_HOST: "${N8N_HOST}"
       N8N_SSH_PORT: "${N8N_SSH_PORT:-2222}"
       REMOTE_BIND_PORT: "${REMOTE_BIND_PORT:-7000}"
+      # autossh retry tuning. Default 30s between checks/dial-attempts; raise
+      # to reduce log noise when n8n is down for long stretches, lower for
+      # snappier recovery. AUTOSSH_GATETIME=0 means "any reconnect counts" —
+      # don't change unless you know what you're doing.
+      AUTOSSH_POLL: "${AUTOSSH_POLL:-30}"
+      AUTOSSH_GATETIME: "${AUTOSSH_GATETIME:-0}"
     volumes:
       # Directory mount — see docs/master-plan/12-multi-q.md §12.5.1 for the
       # rationale (same docker file-bind-mount issue as the other relays,
@@ -22,3 +28,12 @@ services:
       # install.sh populates ./certs/ with id_ed25519, id_ed25519-cert.pub,
       # and n8n_host.pub (the pinned host pubkey of the n8n endpoint).
       - ./certs:/etc/relay-ssh:ro
+    # Cap autossh's chatty reconnect logs. The container retries forever while
+    # n8n is unreachable (no trigger active, port not published, etc.) — at
+    # ~one line per dial-attempt that's enough to fill the Q's eMMC over
+    # weeks. 10 MiB × 3 files keeps ~a week of history at typical rates.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

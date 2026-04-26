@@ -24,6 +24,9 @@ services:
     restart: unless-stopped
     ports:
       - "5678:5678"
+      # Embedded SSH server for Variant B (reverse-SSH relay). Must match the
+      # "Listen Port" set in the UnoQRouterApi credential when transport=ssh-relay.
+      - "2222:2222"
     volumes:
       # SSH-tunneled Unix socket to arduino-router on the Q. Start the tunnel
       # BEFORE `docker compose up` — if /tmp/arduino-router.sock doesn't exist,

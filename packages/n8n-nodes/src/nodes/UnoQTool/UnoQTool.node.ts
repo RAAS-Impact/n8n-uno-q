@@ -257,7 +257,7 @@ export class UnoQTool implements INodeType {
         const timeout = options.timeout ?? DEFAULT_TIMEOUT_MS;
         const idempotent = this.getNodeParameter('idempotent', i, false) as boolean;
 
-        const { descriptor, credentialId } = await resolveTransport(
+        const { descriptor, credentialId, sshCredential } = await resolveTransport(
           this,
           options.socketPath,
           i,
@@ -312,7 +312,7 @@ export class UnoQTool implements INodeType {
         // consume budget that a later legitimate call might need.
         recordCall(counterKey);
 
-        const bridge = await manager.getBridge(descriptor);
+        const bridge = await manager.getBridge(descriptor, { sshCredential });
         const result = await bridge.callWithOptions(method, params, {
           timeoutMs: timeout,
           idempotent,

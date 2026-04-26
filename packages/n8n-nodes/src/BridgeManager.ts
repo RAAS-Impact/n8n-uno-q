@@ -1,5 +1,7 @@
-import { Bridge, describeTransport } from '@raasimpact/arduino-uno-q-bridge';
-import type { TransportDescriptor } from '@raasimpact/arduino-uno-q-bridge';
+import { Bridge, SshTransport, describeTransport } from '@raasimpact/arduino-uno-q-bridge';
+import type { Transport, TransportDescriptor } from '@raasimpact/arduino-uno-q-bridge';
+import { SshServer } from './SshServer.js';
+import type { ResolvedSshCredential } from './transport-resolver.js';
 
 /**
  * Process-singleton that manages shared Bridge instances — one per router
@@ -63,7 +65,17 @@ export class BridgeManager {
     return entry;
   }
 
-  async acquire(descriptor: TransportDescriptor): Promise<Bridge> {
+  /**
+   * `kind: 'ssh'` descriptors carry only routing identity — the actual
+   * Duplex stream comes from a singleton SshServer that the n8n-side
+   * runtime owns. Callers MUST pass the credential payload in `options`
+   * so BridgeManager can boot/configure the singleton on first use.
+   * Other transport kinds ignore `options`.
+   */
+  async acquire(
+    descriptor: TransportDescriptor,
+    options?: { sshCredential?: ResolvedSshCredential },
+  ): Promise<Bridge> {
     const key = describeTransport(descriptor);
     const entry = this.getEntry(descriptor);
     if (entry.pendingClose) {
@@ -79,7 +91,8 @@ export class BridgeManager {
     const opened = !entry.bridge;
     if (!entry.bridge) {
       try {
-        entry.bridge = await Bridge.connect({ transport: descriptor });
+        const transportInstance = await this.buildTransportInstance(descriptor, options);
+        entry.bridge = await Bridge.connect({ transport: descriptor, transportInstance });
       } catch (err) {
         entry.refCount--;
         debug('acquire:connect-failed', key, `refCount=${entry.refCount}`, (err as Error).message);
@@ -99,8 +112,13 @@ export class BridgeManager {
    * nodes: they don't own a subscription, so they must not participate in the
    * acquire/release lifecycle that triggers use to decide when to close the
    * socket.
+   *
+   * SSH descriptor + sshCredential rules: same as acquire() above.
    */
-  async getBridge(descriptor: TransportDescriptor): Promise<Bridge> {
+  async getBridge(
+    descriptor: TransportDescriptor,
+    options?: { sshCredential?: ResolvedSshCredential },
+  ): Promise<Bridge> {
     const key = describeTransport(descriptor);
     const entry = this.getEntry(descriptor);
     if (entry.pendingClose) {
@@ -109,10 +127,42 @@ export class BridgeManager {
     }
     const opened = !entry.bridge;
     if (!entry.bridge) {
-      entry.bridge = await Bridge.connect({ transport: descriptor });
+      const transportInstance = await this.buildTransportInstance(descriptor, options);
+      entry.bridge = await Bridge.connect({ transport: descriptor, transportInstance });
     }
     if (opened) debug('getBridge', key, 'opened new bridge (no refcount change)');
     return entry.bridge;
+  }
+
+  /**
+   * Returns a pre-built Transport when the descriptor demands one. Today
+   * only `kind: 'ssh'` does — the other kinds are constructed by
+   * `Bridge.connect` from the descriptor itself.
+   */
+  private async buildTransportInstance(
+    descriptor: TransportDescriptor,
+    options?: { sshCredential?: ResolvedSshCredential },
+  ): Promise<Transport | undefined> {
+    if (descriptor.kind !== 'ssh') return undefined;
+    if (!options?.sshCredential) {
+      throw new Error(
+        `BridgeManager: descriptor.kind === 'ssh' but no sshCredential supplied. ` +
+          'Resolve the credential via transport-resolver and pass options.sshCredential.',
+      );
+    }
+    const cred = options.sshCredential;
+    const sshServer = SshServer.getInstance();
+    await sshServer.listen({
+      listenAddress: descriptor.listenAddress,
+      listenPort: descriptor.listenPort,
+      hostPrivateKey: cred.hostPrivateKey,
+      userCaPublicKey: cred.userCaPublicKey,
+      requiredPrincipal: cred.requiredPrincipal,
+      connectTimeoutMs: cred.connectTimeoutMs,
+    });
+    return new SshTransport({
+      connect: () => sshServer.connect(descriptor.deviceNick),
+    });
   }
 
   async release(descriptor: TransportDescriptor): Promise<void> {
